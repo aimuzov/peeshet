@@ -42,10 +42,16 @@ const OFFSET = /(Z|[+-]\d\d:\d\d)$/
 
 class ApiError extends Error {
 	readonly status: number
+	readonly headers: Record<string, string>
 
-	constructor(status: number, message: string) {
+	constructor(
+		status: number,
+		message: string,
+		headers: Record<string, string> = {},
+	) {
 		super(message)
 		this.status = status
+		this.headers = headers
 	}
 }
 
@@ -70,7 +76,7 @@ const TOO_BIG = 'Слишком большое тело запроса.'
 async function readBody(req: IncomingMessage): Promise<Buffer> {
 	// Заведомо большое тело не читаем вовсе: соединение закроется после ответа.
 	if (Number(req.headers['content-length']) > MAX_BODY)
-		throw new ApiError(413, TOO_BIG)
+		throw new ApiError(413, TOO_BIG, { connection: 'close' })
 
 	const chunks: Buffer[] = []
 	let size = 0
@@ -79,7 +85,8 @@ async function readBody(req: IncomingMessage): Promise<Buffer> {
 		size += chunk.length
 
 		if (size > MAX_BODY) {
-			// Дочитываем в никуда, иначе клиент не получит ответ.
+			// Дочитываем в никуда, а соединение не закрываем: сброс посреди загрузки
+			// мог бы дойти до клиента раньше ответа.
 			req.resume()
 
 			throw new ApiError(413, TOO_BIG)
@@ -360,12 +367,7 @@ export function serve(deps: ApiDeps): Server {
 	const server = createServer((req, res) => {
 		route(req, res).catch((e) => {
 			if (e instanceof ApiError)
-				return reply(
-					res,
-					e.status,
-					{ error: e.message },
-					e.status === 413 ? { connection: 'close' } : {},
-				)
+				return reply(res, e.status, { error: e.message }, e.headers)
 
 			if (e instanceof Invalid) return reply(res, 400, { error: e.message })
 
