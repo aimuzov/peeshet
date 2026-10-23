@@ -1,4 +1,4 @@
-import type { Rubric } from '#src/post.ts'
+import { Invalid, type Rubric } from '#src/post.ts'
 
 // В Москве нет перехода на летнее время с 2014 года, смещение постоянное.
 const MSK = 3 * 3600
@@ -27,7 +27,7 @@ export const tomorrowAt = (now: number, hour: number) =>
 const mskWeekday = (t: number) => new Date((t + MSK) * 1000).getUTCDay()
 
 /**
- * Первый будущий слот без запланированного поста. Итоги недели выходят в воскресенье,
+ * Первый будущий слот в день без запланированных постов. Итоги недели выходят в воскресенье,
  * остальные рубрики — по будням.
  */
 export function nextFreeSlot(
@@ -36,6 +36,8 @@ export function nextFreeSlot(
 	taken: Set<number>,
 	slots = DEFAULT_SLOTS,
 ): number {
+	const busy = new Set([...taken].map(mskDayStart))
+
 	for (let d = 0; d < 60; d++) {
 		const day = mskDayStart(now) + d * DAY
 		const weekday = mskWeekday(day)
@@ -47,10 +49,10 @@ export function nextFreeSlot(
 			slot = day + slots.weekday * HOUR
 		}
 
-		if (slot !== null && slot > now && !taken.has(slot)) return slot
+		if (slot !== null && slot > now && !busy.has(day)) return slot
 	}
 
-	throw new Error('no free slot in 60 days')
+	throw new Invalid('Нет свободного слота в ближайшие 60 дней.')
 }
 
 /** `22.10 12:00` по Москве. */

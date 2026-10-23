@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
+import { Invalid } from '#src/post.ts'
 import {
 	formatMsk,
 	mskDayStart,
@@ -40,4 +41,20 @@ test('weekly digest goes on Sunday evening', () => {
 
 test('format', () => {
 	assert.equal(formatMsk(THU_NOON), '22.10 12:00')
+})
+
+test('a post at another time still takes the day', () => {
+	const fri10 = mskDayStart(THU_NOON) + 34 * H
+	const mon10 = fri10 + 3 * 24 * H
+
+	assert.equal(nextFreeSlot(THU_NOON, 'девлог', new Set([fri10 + 1800])), mon10)
+})
+
+test('no free slot is an Invalid error', () => {
+	const sun19 = mskDayStart(THU_NOON) + 3 * 24 * H + 19 * H
+	const taken = new Set(
+		Array.from({ length: 10 }, (_, i) => sun19 + i * 7 * 24 * H),
+	)
+
+	assert.throws(() => nextFreeSlot(THU_NOON, 'неделя', taken), Invalid)
 })
