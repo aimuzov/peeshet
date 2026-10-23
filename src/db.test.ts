@@ -201,3 +201,50 @@ test('untaken inbox items by age', () => {
 	db.take()
 	assert.deepEqual(db.untaken(120), [])
 })
+
+test('claim ignores posts that are not due anymore', () => {
+	const { db, clock } = open()
+	const moved = draft(db)
+	const unscheduled = draft(db)
+	const removed = draft(db)
+
+	for (const p of [moved, unscheduled, removed]) db.schedule(p.id, NOW + 60)
+
+	clock.t = NOW + 60
+	db.schedule(moved.id, NOW + 86_400)
+	db.unschedule(unscheduled.id)
+	db.remove(removed.id)
+
+	assert.equal(db.claim(moved.id), null)
+	assert.equal(db.claim(unscheduled.id), null)
+	assert.equal(db.claim(removed.id), null)
+})
+
+test('claim returns the fresh version of the post', () => {
+	const { db, clock } = open()
+	const post = draft(db, 'старый')
+
+	db.schedule(post.id, NOW + 60)
+	db.setText(post.id, 'новый')
+	clock.t = NOW + 60
+
+	const claimed = db.claim(post.id)
+
+	assert.equal(claimed?.text, 'новый')
+	assert.equal(claimed?.status, 'publishing')
+})
+
+test('setPreview is atomic', () => {
+	const { db } = open()
+	const post = draft(db)
+
+	db.setPreview(post.id, [10, 11])
+	assert.throws(() => db.setPreview(post.id, [20, 20]))
+	assert.deepEqual(db.previewIds(post.id), [10, 11])
+})
+
+test('push rejects an unknown post', () => {
+	const { db } = open()
+
+	assert.throws(() => db.push('reply', 999, 'текст'), NotFound)
+})

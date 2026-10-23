@@ -173,17 +173,19 @@ export class Db {
 	}
 
 	setText(id: number, text: string): Post {
-		const post = this.#editable(id)
+		return this.#tx(() => {
+			const post = this.#editable(id)
 
-		checkLimits(text, this.media(id).length)
+			checkLimits(text, this.media(id).length)
 
-		this.#db
-			.prepare(
-				'INSERT INTO revisions (post_id, text, created_at) VALUES (?, ?, ?)',
-			)
-			.run(id, post.text, this.#now())
+			this.#db
+				.prepare(
+					'INSERT INTO revisions (post_id, text, created_at) VALUES (?, ?, ?)',
+				)
+				.run(id, post.text, this.#now())
 
-		return this.#update(id, { text })
+			return this.#update(id, { text })
+		})
 	}
 
 	setMeta(
@@ -223,15 +225,17 @@ export class Db {
 
 	/** Возвращает текст прошлой ревизии и забирает её из истории. */
 	revert(id: number): Post {
-		this.#editable(id)
-		const [last] = this.revisions(id)
+		return this.#tx(() => {
+			this.#editable(id)
+			const [last] = this.revisions(id)
 
-		if (!last) throw new Invalid('Прошлых ревизий нет.')
+			if (!last) throw new Invalid('Прошлых ревизий нет.')
 
-		checkLimits(last.text, this.media(id).length)
-		this.#db.prepare('DELETE FROM revisions WHERE id = ?').run(last.id)
+			checkLimits(last.text, this.media(id).length)
+			this.#db.prepare('DELETE FROM revisions WHERE id = ?').run(last.id)
 
-		return this.#update(id, { text: last.text })
+			return this.#update(id, { text: last.text })
+		})
 	}
 
 	schedule(id: number, at: number): Post {
@@ -264,15 +268,19 @@ export class Db {
 		return rows.map(toPost)
 	}
 
-	/** Забирает пост на публикацию. `false`, если его уже забрали или сняли. */
-	claim(id: number): boolean {
-		const { changes } = this.#db
+	/**
+	 * Забирает созревший пост на публикацию и возвращает его свежую версию; `null`, если его
+	 * уже забрали, сняли или перенесли.
+	 */
+	claim(id: number): Post | null {
+		const t = this.#now()
+		const row = this.#db
 			.prepare(
-				`UPDATE posts SET status = 'publishing', updated_at = ? WHERE id = ? AND status = 'scheduled'`,
+				`UPDATE posts SET status = 'publishing', updated_at = ? WHERE id = ? AND status = 'scheduled' AND publish_at <= ? RETURNING *`,
 			)
-			.run(this.#now(), id)
+			.get(t, id, t) as Row | undefined
 
-		return Number(changes) > 0
+		return row ? toPost(row) : null
 	}
 
 	published(id: number, channelMsgId: number): Post {
@@ -318,15 +326,17 @@ export class Db {
 	}
 
 	addMedia(id: number, fileId: string): Post {
-		const post = this.#editable(id)
+		return this.#tx(() => {
+			const post = this.#editable(id)
 
-		checkLimits(post.text, this.media(id).length + 1)
+			checkLimits(post.text, this.media(id).length + 1)
 
-		this.#db
-			.prepare('INSERT INTO media (post_id, file_id) VALUES (?, ?)')
-			.run(id, fileId)
+			this.#db
+				.prepare('INSERT INTO media (post_id, file_id) VALUES (?, ?)')
+				.run(id, fileId)
 
-		return this.#update(id, {})
+			return this.#update(id, {})
+		})
 	}
 
 	media(id: number): string[] {
@@ -339,17 +349,19 @@ export class Db {
 
 	/** Запоминает сообщения карточки; прежние возвращает, чтобы их удалить. */
 	setPreview(id: number, msgIds: number[]): number[] {
-		const old = this.previewIds(id)
+		return this.#tx(() => {
+			const old = this.previewIds(id)
 
-		this.#db.prepare('DELETE FROM previews WHERE post_id = ?').run(id)
+			this.#db.prepare('DELETE FROM previews WHERE post_id = ?').run(id)
 
-		for (const msgId of msgIds) {
-			this.#db
-				.prepare('INSERT INTO previews (msg_id, post_id) VALUES (?, ?)')
-				.run(msgId, id)
-		}
+			for (const msgId of msgIds) {
+				this.#db
+					.prepare('INSERT INTO previews (msg_id, post_id) VALUES (?, ?)')
+					.run(msgId, id)
+			}
 
-		return old
+			return old
+		})
 	}
 
 	previewIds(id: number): number[] {
@@ -370,6 +382,8 @@ export class Db {
 	}
 
 	push(kind: InboxKind, postId: number | null, text: string | null): InboxItem {
+		if (postId !== null) this.get(postId)
+
 		const { lastInsertRowid } = this.#db
 			.prepare(
 				'INSERT INTO inbox (kind, post_id, text, created_at) VALUES (?, ?, ?, ?)',
@@ -420,6 +434,22 @@ export class Db {
 			.all(this.#now() - age) as Row[]
 
 		return rows.map(toInbox)
+	}
+
+	#tx<T>(fn: () => T): T {
+		this.#db.prepare('BEGIN').run()
+
+		try {
+			const result = fn()
+
+			this.#db.prepare('COMMIT').run()
+
+			return result
+		} catch (error) {
+			this.#db.prepare('ROLLBACK').run()
+
+			throw error
+		}
 	}
 
 	#editable(id: number): Post {
