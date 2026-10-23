@@ -41,7 +41,11 @@ const http = serve({
 	port: settings.port,
 })
 const stop = new AbortController()
-const runner = run(bot)
+// Telegram запоминает allowed_updates от прошлого getUpdates, поэтому задаём список явно:
+// иначе чужой вызов с фильтром тихо отключит кнопки.
+const runner = run(bot, {
+	runner: { fetch: { allowed_updates: ['message', 'callback_query'] } },
+})
 
 runner.task()?.catch((e) => {
 	console.error('runner died', e)
