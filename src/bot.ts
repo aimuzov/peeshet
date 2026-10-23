@@ -48,8 +48,38 @@ export function handlers({
 }: BotDeps): Composer<Context> {
 	const bot = new Composer<Context>()
 	// Чего ждём следующим сообщением после кнопки: правку или время для поста.
-	let awaiting: { kind: 'edit' | 'time'; postId: number; at: number } | null =
-		null
+	let awaiting: {
+		kind: 'edit' | 'time'
+		postId: number
+		at: number
+		promptId: number
+	} | null = null
+
+	/** Забывает вопрос и убирает его из чата: ответ пришёл или вопрос устарел. */
+	async function forget(ctx: Context): Promise<void> {
+		const promptId = awaiting?.promptId
+
+		awaiting = null
+
+		if (promptId !== undefined)
+			await ctx.api.deleteMessage(ownerId, promptId).catch(() => {})
+	}
+
+	async function ask(
+		ctx: Context,
+		kind: 'edit' | 'time',
+		postId: number,
+		at: number,
+		question: string,
+	): Promise<void> {
+		await forget(ctx)
+		const prompt = await ctx.reply(question)
+
+		awaiting = { kind, postId, at, promptId: prompt.message_id }
+	}
+
+	/** Вместо ответа «передал» — реакция: сообщение принято, а лишнего в чате нет. */
+	const seen = (ctx: Context) => ctx.react('👀').catch(() => {})
 
 	// Чужим бот не отвечает вовсе, как и в группах.
 	bot.use(async (ctx, next) => {
@@ -98,11 +128,14 @@ export function handlers({
 			case 's': {
 				if (arg === 'custom') {
 					db.editable(id)
-					awaiting = { kind: 'time', postId: id, at: now }
 
-					return void (await ctx.reply(
+					return ask(
+						ctx,
+						'time',
+						id,
+						now,
 						'Напиши дату и время, например «в пятницу в 12».',
-					))
+					)
 				}
 
 				const { rubric } = db.get(id)
@@ -133,9 +166,8 @@ export function handlers({
 
 			case 'e':
 				db.editable(id)
-				awaiting = { kind: 'edit', postId: id, at: now }
 
-				return void (await ctx.reply('Напиши, что поменять в посте.'))
+				return ask(ctx, 'edit', id, now, 'Напиши, что поменять в посте.')
 
 			case 'c':
 				db.editable(id)
@@ -168,7 +200,7 @@ export function handlers({
 			action !== 'e' &&
 			!(action === 's' && arg === 'custom')
 		)
-			awaiting = null
+			await forget(ctx)
 
 		try {
 			const notice = await act(action, Number(rawId), arg, ctx)
@@ -206,14 +238,22 @@ export function handlers({
 			return void (await ctx.reply(e.message))
 		}
 
-		db.push('photo', post.id, ctx.msg.caption ?? null)
+		// Фото сервер разобрал сам, а подпись могла быть просьбой к сессии. Само фото
+		// удалим, поэтому srcMsgId у входящего нет.
+		if (ctx.msg.caption) db.push('reply', post.id, ctx.msg.caption)
 
 		try {
 			await cards.show(post.id)
 		} catch (e) {
 			console.error('card refresh failed', e)
-			await ctx.reply('Фото прикрепил, а карточку обновить не вышло.')
+
+			return void (await ctx.reply(
+				'Фото прикрепил, а карточку обновить не вышло.',
+			))
 		}
+
+		// Фото уже в карточке, копия от владельца в чате лишняя.
+		await ctx.deleteMessage().catch(() => {})
 	})
 
 	bot.command('start', (ctx) =>
@@ -237,7 +277,8 @@ export function handlers({
 		const pending =
 			!card && awaiting && awaiting.at + AWAIT_TTL >= db.now() ? awaiting : null
 
-		awaiting = null
+		await forget(ctx)
+		const src = ctx.msg.message_id
 
 		if (pending) {
 			const { kind, postId } = pending
@@ -246,14 +287,15 @@ export function handlers({
 				'reply',
 				postId,
 				kind === 'time' ? `Время публикации: ${ctx.msg.text}` : ctx.msg.text,
+				src,
 			)
 		} else if (card) {
-			db.push('reply', card.id, ctx.msg.text)
+			db.push('reply', card.id, ctx.msg.text, src)
 		} else {
-			db.push('message', null, ctx.msg.text)
+			db.push('message', null, ctx.msg.text, src)
 		}
 
-		await ctx.reply(FORWARDED)
+		await seen(ctx)
 	})
 
 	return bot

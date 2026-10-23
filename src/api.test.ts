@@ -214,6 +214,35 @@ test('inbox long poll and ack', async (t) => {
 	)
 })
 
+test('ack deletes the owner message the item came from', async (t) => {
+	const { fake, db, server, call } = await setup()
+
+	t.after(() => server.close())
+	const plain = db.push('message', null, 'привет', 42)
+	const cover = db.push(
+		'cover',
+		db.create({ rubric: 'мысль', text: 'x' }).id,
+		null,
+	)
+
+	assert.equal((await call('GET', '/api/inbox/next')).json.item.srcMsgId, 42)
+
+	fake.fail(
+		'deleteMessage',
+		apiError('deleteMessage', 400, 'Bad Request: message to delete not found'),
+	)
+
+	assert.equal((await call('POST', `/api/inbox/${plain.id}/ack`)).status, 200)
+
+	assert.deepEqual(fake.named('deleteMessage'), [
+		{ chat_id: OWNER, message_id: 42 },
+	])
+
+	assert.equal((await call('POST', `/api/inbox/${cover.id}/ack`)).status, 200)
+	assert.equal(fake.named('deleteMessage').length, 1)
+	assert.equal((await call('POST', '/api/inbox/999/ack')).status, 404)
+})
+
 const quiet = () => {
 	const log = console.error
 

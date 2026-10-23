@@ -5,7 +5,15 @@ import { handlers } from '#src/bot.ts'
 import { Cards } from '#src/cards.ts'
 import { Db } from '#src/db.ts'
 import { Scheduler } from '#src/scheduler.ts'
-import { apiError, CHANNEL, fakeBot, OWNER, press, text } from '#src/testing.ts'
+import {
+	apiError,
+	CHANNEL,
+	fakeBot,
+	OWNER,
+	photo,
+	press,
+	text,
+} from '#src/testing.ts'
 import { mskDayStart } from '#src/time.ts'
 
 // Чт 2026-10-22 12:00 МСК.
@@ -45,18 +53,92 @@ test('strangers are ignored', async () => {
 	assert.equal(db.take(), null)
 })
 
-test('plain text goes to the inbox', async () => {
+test('plain text goes to the inbox with a reaction instead of a reply', async () => {
 	const { fake, db } = setup()
+	const update = text('девлог по sorebody')
 
-	await fake.feed(text('девлог по sorebody'))
+	await fake.feed(update)
 	const item = db.take()
 
 	assert.equal(item?.kind, 'message')
 	assert.equal(item?.text, 'девлог по sorebody')
+	assert.equal(item?.srcMsgId, update.message.message_id)
+	assert.equal(fake.named('sendMessage').length, 0)
 
-	assert.ok(
-		fake.named('sendMessage').some((p) => String(p.text).includes('Передал')),
+	assert.deepEqual(fake.named('setMessageReaction'), [
+		{
+			chat_id: OWNER,
+			message_id: update.message.message_id,
+			reaction: [{ type: 'emoji', emoji: '👀' }],
+		},
+	])
+})
+
+test('a failed reaction does not lose the message', async () => {
+	const { fake, db } = setup()
+
+	fake.fail(
+		'setMessageReaction',
+		apiError('setMessageReaction', 400, 'Bad Request: REACTION_INVALID'),
 	)
+
+	await fake.feed(text('привет'))
+	assert.equal(db.take()?.text, 'привет')
+})
+
+test('the edit prompt is deleted once the answer arrives', async () => {
+	const { fake, db, post } = setup()
+
+	fake.answer('sendMessage', (p) => ({
+		message_id: 4242,
+		date: 0,
+		chat: { id: p.chat_id, type: 'private' },
+		text: p.text,
+	}))
+
+	await fake.feed(press(`e:${post.id}`))
+
+	assert.equal(
+		fake.named('sendMessage')[0].text,
+		'Напиши, что поменять в посте.',
+	)
+
+	await fake.feed(text('убери второй абзац'))
+	assert.equal(db.take()?.postId, post.id)
+
+	assert.deepEqual(fake.named('deleteMessage'), [
+		{ chat_id: OWNER, message_id: 4242 },
+	])
+})
+
+test('the time prompt is deleted when another button cancels it', async () => {
+	const { fake, post } = setup()
+
+	await fake.feed(press(`s:${post.id}:custom`))
+	assert.match(String(fake.named('sendMessage')[0].text), /Напиши дату/)
+	await fake.feed(press(`u:${post.id}`)).catch(() => {})
+	assert.equal(fake.named('deleteMessage').length, 1)
+	await fake.feed(text('просто текст'))
+	assert.equal(fake.named('deleteMessage').length, 1)
+})
+
+test('a second edit press replaces the prompt', async () => {
+	const { fake, post } = setup()
+
+	await fake.feed(press(`e:${post.id}`))
+	await fake.feed(press(`e:${post.id}`))
+	assert.equal(fake.named('sendMessage').length, 2)
+	assert.equal(fake.named('deleteMessage').length, 1)
+})
+
+test('an expired prompt is deleted with the next message', async () => {
+	const { fake, clock, db, post } = setup()
+
+	await fake.feed(press(`e:${post.id}`))
+	clock.t = NOW + 601
+	await fake.feed(text('давно было'))
+	assert.equal(db.take()?.kind, 'message')
+	assert.equal(fake.named('deleteMessage').length, 1)
 })
 
 test('reply to a card is an edit request for that post', async () => {
@@ -115,31 +197,59 @@ test('delete asks first', async () => {
 	assert.equal(db.get(post.id).status, 'deleted')
 })
 
-test('photo in reply to a card is attached', async () => {
+test('photo in reply to a card is attached and the owner message removed', async () => {
 	const { fake, db, post } = setup()
 
 	db.setCard(post.id, 600, 'text')
+	const update = photo('big', { replyTo: 600 })
 
-	await fake.feed({
-		message: {
-			message_id: 9,
-			date: 0,
-			chat: { id: OWNER, type: 'private' },
-			from: { id: OWNER, is_bot: false, first_name: 'A' },
-			photo: [
-				{ file_id: 'small', file_unique_id: 's', width: 90, height: 90 },
-				{ file_id: 'big', file_unique_id: 'b', width: 1280, height: 1280 },
-			],
-			reply_to_message: {
-				message_id: 600,
-				date: 0,
-				chat: { id: OWNER, type: 'private' },
-			},
-		},
-	})
-
+	await fake.feed(update)
 	assert.deepEqual(db.media(post.id), ['big'])
-	assert.equal(db.take()?.kind, 'photo')
+	assert.equal(fake.named('sendPhoto')[0].photo, 'big')
+
+	assert.deepEqual(fake.named('deleteMessage'), [
+		{ chat_id: OWNER, message_id: update.message.message_id },
+	])
+
+	// Фото разобрал сервер, сессии тут делать нечего.
+	assert.equal(db.take(), null)
+	assert.equal(fake.named('sendMessage').length, 0)
+})
+
+test('a photo in reply to an album preview goes to that post', async () => {
+	const { fake, db, post } = setup()
+
+	db.addMedia(post.id, 'f1')
+	db.addMedia(post.id, 'f2')
+	db.setCard(post.id, 600, 'photo')
+	db.addExtra(post.id, 601, 'album')
+	await fake.feed(photo('f3', { replyTo: 601 }))
+	assert.deepEqual(db.media(post.id), ['f1', 'f2', 'f3'])
+	assert.equal(fake.named('editMessageMedia')[0].message_id, 600)
+	assert.deepEqual(db.extras(post.id), [])
+})
+
+test('a photo caption still reaches the session', async () => {
+	const { fake, db, post } = setup()
+
+	db.setCard(post.id, 600, 'text')
+	await fake.feed(photo('big', { replyTo: 600, caption: 'поставь первой' }))
+	const item = db.take()
+
+	assert.equal(item?.kind, 'reply')
+	assert.equal(item?.postId, post.id)
+	assert.equal(item?.text, 'поставь первой')
+	// Само фото уже удалено, удалять при ack нечего.
+	assert.equal(item?.srcMsgId, null)
+})
+
+test('a photo without a card gets a hint', async () => {
+	const { fake, db } = setup()
+
+	await fake.feed(photo('big'))
+	assert.match(String(fake.named('sendMessage')[0].text), /ответом на карточку/)
+	assert.equal(fake.named('deleteMessage').length, 0)
+	assert.equal(db.take(), null)
 })
 
 test('voice gets a polite refusal', async () => {
@@ -426,24 +536,12 @@ test('a photo is kept even when the card refresh fails', async () => {
 	db.setCard(post.id, 600, 'text')
 	fake.fail('sendPhoto', apiError('sendPhoto', 500, 'oops'))
 
-	await fake.feed({
-		message: {
-			message_id: 9,
-			date: 0,
-			chat: { id: OWNER, type: 'private' },
-			from: { id: OWNER, is_bot: false, first_name: 'A' },
-			photo: [{ file_id: 'big', file_unique_id: 'b', width: 9, height: 9 }],
-			reply_to_message: {
-				message_id: 600,
-				date: 0,
-				chat: { id: OWNER, type: 'private' },
-			},
-		},
-	})
-
+	await fake.feed(photo('big', { replyTo: 600 }))
 	console.error = log
 	assert.deepEqual(db.media(post.id), ['big'])
-	assert.equal(db.take()?.kind, 'photo')
+	assert.equal(db.take(), null)
+	// Карточку не обновили: фото владельца остаётся, чтобы было видно, что пришло.
+	assert.equal(fake.named('deleteMessage').length, 0)
 
 	assert.equal(
 		fake.named('sendMessage').at(-1)?.text,

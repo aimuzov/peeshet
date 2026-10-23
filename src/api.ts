@@ -326,7 +326,11 @@ export function serve(deps: ApiDeps): Server {
 		const id = Number(segment)
 
 		if (req.method === 'POST' && action === 'ack' && Number.isSafeInteger(id)) {
-			db.ack(id)
+			const { srcMsgId } = db.ack(id)
+
+			// Разобранное сообщение владельца больше не нужно в чате; не вышло — не страшно.
+			if (srcMsgId !== null)
+				await api.deleteMessage(ownerId, srcMsgId).catch(() => {})
 
 			return reply(res, 200, { ok: true })
 		}

@@ -24,13 +24,15 @@ export type Post = {
 	updatedAt: number
 }
 
-export type InboxKind = 'message' | 'reply' | 'cover' | 'photo'
+export type InboxKind = 'message' | 'reply' | 'cover'
 
 export type InboxItem = {
 	id: number
 	kind: InboxKind
 	postId: number | null
 	text: string | null
+	/** Сообщение владельца, из которого пришло входящее: его удаляем после ack. */
+	srcMsgId: number | null
 	createdAt: number
 	takenAt: number | null
 }

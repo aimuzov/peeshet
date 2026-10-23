@@ -60,6 +60,7 @@ const SCHEMA = [
 		kind TEXT NOT NULL,
 		post_id INTEGER REFERENCES posts(id),
 		text TEXT,
+		src_msg_id INTEGER,
 		created_at INTEGER NOT NULL,
 		taken_at INTEGER,
 		acked_at INTEGER
@@ -119,6 +120,7 @@ const toInbox = (r: Row): InboxItem => ({
 	kind: r.kind as InboxKind,
 	postId: num(r.post_id),
 	text: str(r.text),
+	srcMsgId: num(r.src_msg_id),
 	createdAt: Number(r.created_at),
 	takenAt: num(r.taken_at),
 })
@@ -133,6 +135,12 @@ export class Db {
 		this.#db = new DatabaseSync(path)
 
 		for (const sql of SCHEMA) this.#db.prepare(sql).run()
+
+		// В базе разработки inbox могла остаться без этой колонки.
+		const inbox = this.#db.prepare('PRAGMA table_info(inbox)').all() as Row[]
+
+		if (!inbox.some((c) => c.name === 'src_msg_id'))
+			this.#db.prepare('ALTER TABLE inbox ADD COLUMN src_msg_id INTEGER').run()
 
 		this.#now = now
 	}
@@ -426,14 +434,19 @@ export class Db {
 		return row ? this.get(Number(row.post_id)) : null
 	}
 
-	push(kind: InboxKind, postId: number | null, text: string | null): InboxItem {
+	push(
+		kind: InboxKind,
+		postId: number | null,
+		text: string | null,
+		srcMsgId: number | null = null,
+	): InboxItem {
 		if (postId !== null) this.get(postId)
 
 		const { lastInsertRowid } = this.#db
 			.prepare(
-				'INSERT INTO inbox (kind, post_id, text, created_at) VALUES (?, ?, ?, ?)',
+				'INSERT INTO inbox (kind, post_id, text, src_msg_id, created_at) VALUES (?, ?, ?, ?, ?)',
 			)
-			.run(kind, postId, text, this.#now())
+			.run(kind, postId, text, srcMsgId, this.#now())
 		const row = this.#db
 			.prepare('SELECT * FROM inbox WHERE id = ?')
 			.get(Number(lastInsertRowid)) as Row
@@ -462,12 +475,14 @@ export class Db {
 		return { ...toInbox(row), takenAt: t }
 	}
 
-	ack(id: number): void {
-		const { changes } = this.#db
-			.prepare('UPDATE inbox SET acked_at = ? WHERE id = ?')
-			.run(this.#now(), id)
+	ack(id: number): InboxItem {
+		const row = this.#db
+			.prepare('UPDATE inbox SET acked_at = ? WHERE id = ? RETURNING *')
+			.get(this.#now(), id) as Row | undefined
 
-		if (!Number(changes)) throw new NotFound(`Входящего ${id} нет.`)
+		if (!row) throw new NotFound(`Входящего ${id} нет.`)
+
+		return toInbox(row)
 	}
 
 	/** Входящие, которые никто не взял дольше `age` секунд. */

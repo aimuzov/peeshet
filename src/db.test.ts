@@ -211,7 +211,8 @@ test('a stale previews table is dropped on open', () => {
 
 	assert.ok(!tables.includes('previews'))
 	assert.ok(tables.includes('cards'))
-	assert.equal(db.push('message', null, 'x').text, 'x')
+	// В старой inbox нет src_msg_id: колонка добавляется при открытии.
+	assert.equal(db.push('message', null, 'x', 5).srcMsgId, 5)
 	rmSync(dir, { recursive: true })
 })
 
@@ -272,6 +273,17 @@ test('claim returns the fresh version of the post', () => {
 
 	assert.equal(claimed?.text, 'новый')
 	assert.equal(claimed?.status, 'publishing')
+})
+
+test('inbox keeps the source message and ack returns it', () => {
+	const { db } = open()
+	const a = db.push('message', null, 'привет', 42)
+	const b = db.push('cover', draft(db).id, null)
+
+	assert.equal(a.srcMsgId, 42)
+	assert.equal(b.srcMsgId, null)
+	assert.equal(db.take()?.srcMsgId, 42)
+	assert.equal(db.ack(a.id).srcMsgId, 42)
 })
 
 test('push rejects an unknown post', () => {
