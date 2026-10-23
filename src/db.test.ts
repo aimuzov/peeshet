@@ -152,3 +152,52 @@ test('list hides deleted and sorts by date', () => {
 
 	assert.deepEqual(db.scheduledTimes(), new Set([NOW + 10]))
 })
+
+test('media counts against caption limit', () => {
+	const { db } = open()
+	const post = draft(db, 'a'.repeat(2000))
+
+	assert.throws(() => db.addMedia(post.id, 'f1'), /1024/)
+	db.setText(post.id, 'short')
+	db.addMedia(post.id, 'f1')
+	db.addMedia(post.id, 'f2')
+	assert.deepEqual(db.media(post.id), ['f1', 'f2'])
+	assert.throws(() => db.setText(post.id, 'a'.repeat(2000)), /1024/)
+})
+
+test('preview messages map back to their post', () => {
+	const { db } = open()
+	const post = draft(db)
+
+	assert.deepEqual(db.setPreview(post.id, [10, 11]), [])
+	assert.equal(db.byPreview(11)?.id, post.id)
+	assert.deepEqual(db.setPreview(post.id, [12]), [10, 11])
+	assert.equal(db.byPreview(10), null)
+})
+
+test('inbox take, ack and reclaim', () => {
+	const { db, clock } = open()
+	const post = draft(db)
+	const a = db.push('message', null, 'девлог по sorebody')
+	const b = db.push('reply', post.id, 'сократи')
+
+	assert.equal(db.take()?.id, a.id)
+	assert.equal(db.take()?.id, b.id)
+	assert.equal(db.take(), null)
+	db.ack(a.id)
+	clock.t = NOW + 601
+	// b взят, но не подтверждён — через 10 минут отдаётся снова.
+	assert.equal(db.take()?.id, b.id)
+	assert.throws(() => db.ack(999), NotFound)
+})
+
+test('untaken inbox items by age', () => {
+	const { db, clock } = open()
+
+	db.push('message', null, 'привет')
+	assert.deepEqual(db.untaken(120), [])
+	clock.t = NOW + 120
+	assert.equal(db.untaken(120).length, 1)
+	db.take()
+	assert.deepEqual(db.untaken(120), [])
+})
