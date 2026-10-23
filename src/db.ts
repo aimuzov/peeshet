@@ -174,7 +174,7 @@ export class Db {
 
 	setText(id: number, text: string): Post {
 		return this.#tx(() => {
-			const post = this.#editable(id)
+			const post = this.editable(id)
 
 			checkLimits(text, this.media(id).length)
 
@@ -196,7 +196,7 @@ export class Db {
 			imagePrompt?: string | null
 		},
 	): Post {
-		this.#editable(id)
+		this.editable(id)
 		const fields: Row = {}
 
 		if (meta.rubric !== undefined) fields.rubric = meta.rubric
@@ -226,7 +226,7 @@ export class Db {
 	/** Возвращает текст прошлой ревизии и забирает её из истории. */
 	revert(id: number): Post {
 		return this.#tx(() => {
-			this.#editable(id)
+			this.editable(id)
 			const [last] = this.revisions(id)
 
 			if (!last) throw new Invalid('Прошлых ревизий нет.')
@@ -327,7 +327,7 @@ export class Db {
 
 	addMedia(id: number, fileId: string): Post {
 		return this.#tx(() => {
-			const post = this.#editable(id)
+			const post = this.editable(id)
 
 			checkLimits(post.text, this.media(id).length + 1)
 
@@ -452,7 +452,7 @@ export class Db {
 		}
 	}
 
-	#editable(id: number): Post {
+	editable(id: number): Post {
 		const post = this.get(id)
 
 		if (!EDITABLE.includes(post.status))

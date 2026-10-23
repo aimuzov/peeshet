@@ -16,6 +16,8 @@ export type BotDeps = {
 	kick: () => void
 }
 
+// Сколько секунд после кнопки «Править» или «Своё время» ждём ответ.
+const AWAIT_TTL = 600
 const FORWARDED = 'Передал в сессию.'
 
 export function handlers({
@@ -26,11 +28,12 @@ export function handlers({
 }: BotDeps): Composer<Context> {
 	const bot = new Composer<Context>()
 	// Чего ждём следующим сообщением после кнопки: правку или время для поста.
-	let awaiting: { kind: 'edit' | 'time'; postId: number } | null = null
+	let awaiting: { kind: 'edit' | 'time'; postId: number; at: number } | null =
+		null
 
-	// Чужим бот не отвечает вовсе.
+	// Чужим бот не отвечает вовсе, как и в группах.
 	bot.use(async (ctx, next) => {
-		if (ctx.from?.id === ownerId) await next()
+		if (ctx.from?.id === ownerId && ctx.chat?.type === 'private') await next()
 	})
 
 	bot.command('queue', async (ctx) => {
@@ -68,30 +71,31 @@ export function handlers({
 				}))
 
 			case 's': {
-				const post = db.get(id)
-
 				if (arg === 'custom') {
-					awaiting = { kind: 'time', postId: id }
+					db.editable(id)
+					awaiting = { kind: 'time', postId: id, at: now }
 
 					return void (await ctx.reply(
 						'Напиши дату и время, например «в пятницу в 12».',
 					))
 				}
 
+				const { rubric } = db.get(id)
 				const presets: Record<string, () => number> = {
 					now: () => now,
 					today: () => todayAt(now, 19),
 					tomorrow: () => tomorrowAt(now, 10),
-					next: () => nextFreeSlot(now, post.rubric, db.scheduledTimes()),
+					next: () => nextFreeSlot(now, rubric, db.scheduledTimes()),
 				}
 				const at = arg ? presets[arg]?.() : undefined
 
 				if (at === undefined) throw new Invalid('Не понял кнопку.')
 
 				db.schedule(id, at)
-				await cards.show(id)
 
 				if (arg === 'now') kick()
+
+				await cards.show(id)
 
 				return
 			}
@@ -102,13 +106,13 @@ export function handlers({
 				return cards.show(id)
 
 			case 'e':
-				db.get(id)
-				awaiting = { kind: 'edit', postId: id }
+				db.editable(id)
+				awaiting = { kind: 'edit', postId: id, at: now }
 
 				return void (await ctx.reply('Напиши, что поменять в посте.'))
 
 			case 'c':
-				db.get(id)
+				db.editable(id)
 				db.push('cover', id, null)
 
 				return FORWARDED
@@ -134,12 +138,21 @@ export function handlers({
 	bot.on('callback_query:data', async (ctx) => {
 		const [action, rawId, arg] = ctx.callbackQuery.data.split(':')
 
+		// Любая кнопка, кроме ожидающих текста, отменяет прежний вопрос.
+		if (action !== 'e' && !(action === 's' && arg === 'custom')) awaiting = null
+
 		try {
 			const notice = await act(action, Number(rawId), arg, ctx)
 
 			await ctx.answerCallbackQuery(notice ? { text: notice } : undefined)
 		} catch (e) {
-			if (!(e instanceof Invalid || e instanceof NotFound)) throw e
+			if (!(e instanceof Invalid || e instanceof NotFound)) {
+				await ctx
+					.answerCallbackQuery({ text: 'Не получилось, попробуй ещё раз.' })
+					.catch(() => {})
+
+				throw e
+			}
 
 			await ctx.answerCallbackQuery({ text: e.message, show_alert: true })
 		}
@@ -176,10 +189,14 @@ export function handlers({
 		const replyTo = ctx.msg.reply_to_message?.message_id
 		const card = replyTo ? db.byPreview(replyTo) : null
 
-		if (awaiting) {
-			const { kind, postId } = awaiting
+		// Ответ на карточку точнее, чем ожидание после кнопки.
+		const pending =
+			!card && awaiting && awaiting.at + AWAIT_TTL >= db.now() ? awaiting : null
 
-			awaiting = null
+		awaiting = null
+
+		if (pending) {
+			const { kind, postId } = pending
 
 			db.push(
 				'reply',

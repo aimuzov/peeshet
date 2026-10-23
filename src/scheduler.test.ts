@@ -181,3 +181,111 @@ test('a post rescheduled while the tick runs is not sent', async () => {
 	assert.equal(toChannel(fake).length, 1)
 	assert.equal(db.get(second.id).status, 'scheduled')
 })
+
+const quiet = () => {
+	const orig = console.error
+
+	console.error = () => {}
+
+	return () => void (console.error = orig)
+}
+
+const reply = (p: Record<string, unknown>) => ({
+	message_id: 2000,
+	date: 0,
+	chat: { id: p.chat_id, type: 'private' },
+	text: p.text,
+})
+
+test('a failing «Вышло» notice does not undo the publication', async () => {
+	const { fake, db, scheduler, post } = setup()
+	const restore = quiet()
+
+	db.schedule(post.id, NOW)
+
+	fake.answer('sendMessage', (p) => {
+		if (p.chat_id === OWNER) throw apiError('sendMessage', 400, 'Bad Request')
+
+		return reply(p)
+	})
+
+	await scheduler.tick()
+	restore()
+	assert.equal(db.get(post.id).status, 'published')
+})
+
+test('a failing card after a send failure still marks the post failed', async () => {
+	const { fake, db, scheduler, post } = setup()
+	const restore = quiet()
+
+	db.schedule(post.id, NOW)
+	fake.fail('sendMessage', apiError('sendMessage', 403, 'Forbidden'))
+
+	fake.answer('sendMessage', (p) => {
+		if (p.chat_id === OWNER) throw apiError('sendMessage', 400, 'Bad Request')
+
+		return reply(p)
+	})
+
+	await scheduler.tick()
+	restore()
+	assert.equal(db.get(post.id).status, 'failed')
+})
+
+test('run survives a throwing tick', async () => {
+	const { db, scheduler } = setup()
+	const restore = quiet()
+	const ctl = new AbortController()
+	let calls = 0
+
+	db.due = () => {
+		if (++calls === 1) throw new Error('boom')
+
+		if (calls === 2) ctl.abort()
+
+		return []
+	}
+
+	await scheduler.run(ctl.signal)
+	restore()
+	assert.equal(calls, 2)
+})
+
+test('nudge is retried after a failed send', async () => {
+	const { fake, clock, db, scheduler } = setup()
+	const restore = quiet()
+
+	db.push('message', null, 'привет')
+	clock.t = NOW + 120
+	fake.fail('sendMessage', apiError('sendMessage', 400, 'Bad Request'))
+	await scheduler.tick()
+	await scheduler.tick()
+	restore()
+
+	assert.equal(
+		toOwner(fake).filter((t) => t.includes('Сессия на маке не запущена'))
+			.length,
+		2,
+	)
+})
+
+test('recover survives a failing card and offers «Открыть»', async () => {
+	const { fake, clock, db, scheduler, post } = setup()
+	const late = db.create({ rubric: 'мысль', text: 'Поздно' })
+	const restore = quiet()
+
+	db.schedule(post.id, NOW)
+	db.claim(post.id)
+	db.schedule(late.id, NOW)
+	clock.t = NOW + 3600
+	fake.fail('sendMessage', apiError('sendMessage', 400, 'Bad Request'))
+	await scheduler.recover()
+	restore()
+	assert.equal(db.get(post.id).status, 'failed')
+	const kb = JSON.stringify(
+		fake.named('sendMessage').at(-1)?.reply_markup ?? {},
+	)
+
+	assert.match(kb, new RegExp(`o:${late.id}`))
+	assert.doesNotMatch(kb, /"d:/)
+})

@@ -19,6 +19,8 @@ const INBOX_IDLE = 120
 const title = (post: Post) =>
 	post.text.length > 24 ? `${post.text.slice(0, 24)}…` : post.text
 
+const log = (what: string) => (e: unknown) => console.error(what, e)
+
 export class Scheduler {
 	readonly #api: Api
 	readonly #db: Db
@@ -43,7 +45,8 @@ export class Scheduler {
 
 	/** Разбор после рестарта, до первого тика. */
 	async recover(): Promise<void> {
-		for (const id of this.#db.recoverPublishing()) await this.#cards.show(id)
+		for (const id of this.#db.recoverPublishing())
+			await this.#cards.show(id).catch(log('recover card failed'))
 
 		const overdue = this.#db.unscheduleOverdue(GRACE)
 
@@ -53,13 +56,23 @@ export class Scheduler {
 
 		for (const post of overdue)
 			kb.text(`Сейчас: ${title(post)}`, `s:${post.id}:now`)
-				.text('Дата', `d:${post.id}`)
+				.text('Открыть', `o:${post.id}`)
 				.row()
 
-		await this.#api.sendMessage(
-			this.#cfg.ownerId,
+		await this.#notify(
 			'Сервер не работал, и эти посты не вышли вовремя. Они вернулись в черновики.',
 			{ reply_markup: kb },
+		).catch(log('recover notice failed'))
+	}
+
+	/** Сообщение владельцу; сетевые сбои повторяются так же, как при публикации. */
+	#notify(
+		text: string,
+		other?: Parameters<Api['sendMessage']>[2],
+	): Promise<unknown> {
+		return retry(
+			() => this.#api.sendMessage(this.#cfg.ownerId, text, other),
+			this.#sleep,
 		)
 	}
 
@@ -71,7 +84,12 @@ export class Scheduler {
 
 	async run(signal: AbortSignal): Promise<void> {
 		while (!signal.aborted) {
-			await this.tick()
+			try {
+				await this.tick()
+			} catch (e) {
+				console.error('tick failed', e)
+			}
+
 			await delay(TICK, undefined, { signal }).catch(() => {})
 		}
 	}
@@ -90,7 +108,7 @@ export class Scheduler {
 			this.#sleep,
 		).catch(async (e: unknown) => {
 			this.#db.failed(post.id, reason(e))
-			await this.#cards.show(post.id)
+			await this.#cards.show(post.id).catch(log('failure card failed'))
 
 			return null
 		})
@@ -100,12 +118,13 @@ export class Scheduler {
 		this.#db.published(post.id, ids[0])
 		const url = channelLink(this.#cfg.channelId, ids[0])
 
-		await this.#api.sendMessage(
-			this.#cfg.ownerId,
-			url ? `Вышло: ${url}` : 'Вышло.',
-		)
-
-		await this.#cards.hide(post.id)
+		// Пост уже вышел: сбой уведомления или карточки состояние не меняет.
+		try {
+			await this.#notify(url ? `Вышло: ${url}` : 'Вышло.')
+			await this.#cards.hide(post.id)
+		} catch (e) {
+			console.error('publish notice failed', e)
+		}
 	}
 
 	async #nudge(): Promise<void> {
@@ -117,11 +136,15 @@ export class Scheduler {
 
 		if (this.#nudged || !this.#db.untaken(INBOX_IDLE).length) return
 
-		this.#nudged = true
+		try {
+			await this.#notify(
+				'Сессия на маке не запущена, займусь, когда запустишь.',
+			)
 
-		await this.#api.sendMessage(
-			this.#cfg.ownerId,
-			'Сессия на маке не запущена, займусь, когда запустишь.',
-		)
+			this.#nudged = true
+		} catch (e) {
+			// Флаг не взведён: следующий тик попробует снова.
+			console.error('nudge failed', e)
+		}
 	}
 }
