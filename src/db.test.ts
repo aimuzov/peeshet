@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 
 import { Db } from '#src/db.ts'
@@ -165,14 +169,50 @@ test('media counts against caption limit', () => {
 	assert.throws(() => db.setText(post.id, 'a'.repeat(2000)), /1024/)
 })
 
-test('preview messages map back to their post', () => {
+test('card and extra messages map back to their post', () => {
 	const { db } = open()
 	const post = draft(db)
 
-	assert.deepEqual(db.setPreview(post.id, [10, 11]), [])
+	assert.equal(db.card(post.id), null)
+	db.setCard(post.id, 10, 'text')
+	assert.deepEqual(db.card(post.id), { msgId: 10, kind: 'text' })
+	db.addExtra(post.id, 11, 'album')
+	db.addExtra(post.id, 12, 'error')
+	assert.equal(db.byPreview(10)?.id, post.id)
 	assert.equal(db.byPreview(11)?.id, post.id)
-	assert.deepEqual(db.setPreview(post.id, [12]), [10, 11])
+	db.setCard(post.id, 20, 'photo')
 	assert.equal(db.byPreview(10), null)
+	assert.deepEqual(db.card(post.id), { msgId: 20, kind: 'photo' })
+	assert.deepEqual(db.takeExtras(post.id, 'album'), [11])
+	assert.equal(db.byPreview(11), null)
+	assert.deepEqual(db.takeExtras(post.id), [12])
+	assert.deepEqual(db.takeExtras(post.id), [])
+	db.dropCard(post.id)
+	assert.equal(db.card(post.id), null)
+	assert.equal(db.byPreview(20), null)
+})
+
+test('a stale previews table is dropped on open', () => {
+	const dir = mkdtempSync(join(tmpdir(), 'peeshet-'))
+	const path = join(dir, 'p.db')
+	const raw = new DatabaseSync(path)
+
+	raw.exec(`
+		CREATE TABLE previews (msg_id INTEGER PRIMARY KEY, post_id INTEGER);
+		CREATE TABLE inbox (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, post_id INTEGER, text TEXT, created_at INTEGER NOT NULL, taken_at INTEGER, acked_at INTEGER);`)
+
+	raw.close()
+
+	const db = new Db(path, () => NOW)
+	const tables = new DatabaseSync(path)
+		.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`)
+		.all()
+		.map((r) => r.name)
+
+	assert.ok(!tables.includes('previews'))
+	assert.ok(tables.includes('cards'))
+	assert.equal(db.push('message', null, 'x').text, 'x')
+	rmSync(dir, { recursive: true })
 })
 
 test('inbox take, ack and reclaim', () => {
@@ -232,15 +272,6 @@ test('claim returns the fresh version of the post', () => {
 
 	assert.equal(claimed?.text, 'новый')
 	assert.equal(claimed?.status, 'publishing')
-})
-
-test('setPreview is atomic', () => {
-	const { db } = open()
-	const post = draft(db)
-
-	db.setPreview(post.id, [10, 11])
-	assert.throws(() => db.setPreview(post.id, [20, 20]))
-	assert.deepEqual(db.previewIds(post.id), [10, 11])
 })
 
 test('push rejects an unknown post', () => {

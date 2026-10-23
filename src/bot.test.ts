@@ -62,8 +62,8 @@ test('plain text goes to the inbox', async () => {
 test('reply to a card is an edit request for that post', async () => {
 	const { fake, db, post } = setup()
 
-	db.setPreview(post.id, [500, 501])
-	await fake.feed(text('сократи', { replyTo: 501 }))
+	db.setCard(post.id, 500, 'text')
+	await fake.feed(text('сократи', { replyTo: 500 }))
 	const item = db.take()
 
 	assert.equal(item?.kind, 'reply')
@@ -118,7 +118,7 @@ test('delete asks first', async () => {
 test('photo in reply to a card is attached', async () => {
 	const { fake, db, post } = setup()
 
-	db.setPreview(post.id, [600])
+	db.setCard(post.id, 600, 'text')
 
 	await fake.feed({
 		message: {
@@ -233,7 +233,7 @@ test('edit on one card, then a reply to another card goes to the other post', as
 	const { fake, db, post } = setup()
 	const other = db.create({ rubric: 'мысль', text: 'Другой' })
 
-	db.setPreview(other.id, [700])
+	db.setCard(other.id, 700, 'text')
 	await fake.feed(press(`e:${post.id}`))
 	await fake.feed(text('сократи', { replyTo: 700 }))
 	const item = db.take()
@@ -286,11 +286,67 @@ test('today and next presets schedule the post', async () => {
 test('delete flow shows the confirm menu and xx hides the card', async () => {
 	const { fake, db, post } = setup()
 
-	db.setPreview(post.id, [800, 801])
-	await fake.feed(press(`x:${post.id}`))
+	db.setCard(post.id, 800, 'text')
+	db.addExtra(post.id, 801, 'album')
+	await fake.feed(press(`x:${post.id}`, { msgId: 800 }))
 	assert.equal(fake.named('editMessageReplyMarkup').length, 1)
-	await fake.feed(press(`xx:${post.id}`))
+	assert.equal(fake.named('editMessageReplyMarkup')[0].message_id, 800)
+	await fake.feed(press(`xx:${post.id}`, { msgId: 800 }))
 	assert.deepEqual(fake.named('deleteMessages').at(-1)?.message_ids, [800, 801])
+	assert.equal(db.card(post.id), null)
+})
+
+test('«Назад» from a menu restores the card in place', async () => {
+	const { fake, db, post } = setup()
+
+	db.setCard(post.id, 800, 'text')
+	await fake.feed(press(`d:${post.id}`, { msgId: 800 }))
+	await fake.feed(press(`o:${post.id}`, { msgId: 800 }))
+	const [edit] = fake.named('editMessageText')
+
+	assert.equal(edit.message_id, 800)
+	assert.match(JSON.stringify(edit.reply_markup), new RegExp(`"n:${post.id}"`))
+	assert.equal(fake.named('sendMessage').length, 0)
+})
+
+test('the status button answers silently', async () => {
+	const { fake, post } = setup()
+
+	await fake.feed(press(`n:${post.id}`))
+	assert.equal(fake.calls.length, 1)
+	assert.deepEqual(fake.named('answerCallbackQuery')[0].text, undefined)
+})
+
+test('the album button sends the whole album', async () => {
+	const { fake, db, post } = setup()
+
+	db.addMedia(post.id, 'f1')
+	db.addMedia(post.id, 'f2')
+	db.setCard(post.id, 800, 'photo')
+	await fake.feed(press(`a:${post.id}`, { msgId: 800 }))
+	assert.equal(fake.named('sendMediaGroup').length, 1)
+	assert.equal(db.extras(post.id, 'album').length, 2)
+	assert.equal(fake.named('answerCallbackQuery').length, 1)
+})
+
+test('a reply to an album preview goes to that post', async () => {
+	const { fake, db, post } = setup()
+
+	db.setCard(post.id, 800, 'photo')
+	db.addExtra(post.id, 802, 'album')
+	await fake.feed(text('поменяй порядок', { replyTo: 802 }))
+	const item = db.take()
+
+	assert.equal(item?.kind, 'reply')
+	assert.equal(item?.postId, post.id)
+})
+
+test('/queue «Открыть» sends a fresh card when there is none', async () => {
+	const { fake, post } = setup()
+
+	await fake.feed(press(`o:${post.id}`))
+	assert.equal(fake.named('sendMessage').length, 1)
+	assert.equal(fake.named('sendMessage')[0].text, 'Пост')
 })
 
 test('owner messages in a group are ignored', async () => {
@@ -308,9 +364,9 @@ test('owner messages in a group are ignored', async () => {
 	assert.equal(db.take(), null)
 })
 
-test('«Сейчас» leaves no card after publishing', async () => {
+test('«Сейчас» turns the card into the published one', async () => {
 	let running: Promise<void> = Promise.resolve()
-	let cardAtKick = 0
+	let cardAtKick: number | undefined
 	const { fake, db, post } = setup(({ fake, db, cards }) => {
 		const scheduler = new Scheduler(
 			fake.api,
@@ -321,16 +377,24 @@ test('«Сейчас» leaves no card after publishing', async () => {
 		)
 
 		return () => {
-			cardAtKick = db.previewIds(db.list()[0].id).length
+			cardAtKick = db.card(db.list()[0].id)?.msgId
 			running = scheduler.tick()
 		}
 	})
 
 	await fake.feed(press(`s:${post.id}:now`))
 	await running
-	assert.ok(cardAtKick > 0) // планировщик стартует, когда карточка уже нарисована
+	// Планировщик стартует, когда карточка уже нарисована, и правит её же.
+	assert.ok(cardAtKick)
 	assert.equal(db.get(post.id).status, 'published')
-	assert.deepEqual(db.previewIds(post.id), [])
+	assert.equal(db.card(post.id)?.msgId, cardAtKick)
+
+	assert.match(
+		JSON.stringify(fake.named('editMessageText').at(-1)?.reply_markup),
+		/опубликован/,
+	)
+
+	assert.equal(fake.named('deleteMessages').length, 0)
 })
 
 test('/start replies with help and goes nowhere else', async () => {
@@ -359,8 +423,8 @@ test('a photo is kept even when the card refresh fails', async () => {
 	const log = console.error
 
 	console.error = () => {}
-	db.setPreview(post.id, [600])
-	fake.fail('sendMessage', apiError('sendMessage', 500, 'oops'))
+	db.setCard(post.id, 600, 'text')
+	fake.fail('sendPhoto', apiError('sendPhoto', 500, 'oops'))
 
 	await fake.feed({
 		message: {

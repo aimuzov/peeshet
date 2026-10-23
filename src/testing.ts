@@ -47,14 +47,23 @@ const OK_TRUE = new Set([
 	'deleteMessages',
 	'answerCallbackQuery',
 	'setMyCommands',
+	'setMessageReaction',
+])
+
+// Правка возвращает то же сообщение: id не меняется.
+const EDITS = new Set([
+	'editMessageText',
+	'editMessageMedia',
+	'editMessageReplyMarkup',
+	'editMessageCaption',
 ])
 
 /**
  * Бот с подменённым транспортом: вызовы Bot API не уходят в сеть, а копятся в `calls`.
  *
  * Метод без своего ответа из `answer` отвечает сообщением с новым `message_id`,
- * `sendMediaGroup` — массивом сообщений по числу фото. `fail` роняет следующие
- * вызовы метода заданными ошибками по очереди.
+ * `sendMediaGroup` — массивом сообщений по числу фото, правки `editMessage*` — тем же
+ * сообщением. `fail` роняет следующие вызовы метода заданными ошибками по очереди.
  */
 export function fakeBot() {
 	const bot = new Bot('1:token', { botInfo: ME })
@@ -104,7 +113,29 @@ export function fakeBot() {
 				caption: p.caption,
 			}
 		else if (OK_TRUE.has(method)) result = true
-		else result = message(p)
+		else if (EDITS.has(method)) {
+			const media = p.media as { media?: string; caption?: string } | undefined
+
+			result = {
+				message_id: p.message_id,
+				date: 0,
+				edit_date: 1,
+				chat: { id: p.chat_id, type: 'private' },
+				...(media
+					? {
+							photo: [
+								{
+									file_id: media.media,
+									file_unique_id: 'u',
+									width: 1,
+									height: 1,
+								},
+							],
+							caption: media.caption,
+						}
+					: { text: p.text }),
+			}
+		} else result = message(p)
 
 		return { ok: true, result } as never
 	})
@@ -174,3 +205,43 @@ export const press = (
 		},
 	},
 })
+
+/** Фото от владельца, по умолчанию ответом на сообщение `replyTo`. */
+export const photo = (
+	fileId: string,
+	opts: { replyTo?: number; caption?: string } = {},
+) => ({
+	message: {
+		message_id: nextId++,
+		date: 0,
+		chat: { id: OWNER, type: 'private' },
+		from: { id: OWNER, is_bot: false, first_name: 'A' },
+		photo: [
+			{
+				file_id: `${fileId}-small`,
+				file_unique_id: 's',
+				width: 90,
+				height: 90,
+			},
+			{ file_id: fileId, file_unique_id: 'b', width: 1280, height: 1280 },
+		],
+		...(opts.caption ? { caption: opts.caption } : {}),
+		...(opts.replyTo
+			? {
+					reply_to_message: {
+						message_id: opts.replyTo,
+						date: 0,
+						chat: { id: OWNER, type: 'private' },
+					},
+				}
+			: {}),
+	},
+})
+
+/** Telegram так отвечает на правку, которая ничего не меняет. */
+export const notModified = (method: string) =>
+	apiError(
+		method,
+		400,
+		'Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message',
+	)

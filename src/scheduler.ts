@@ -4,7 +4,7 @@
 import { setTimeout as delay } from 'node:timers/promises'
 import { InlineKeyboard, type Api } from 'grammy'
 
-import { channelLink, type Cards, type CardsConfig } from '#src/cards.ts'
+import type { Cards, CardsConfig } from '#src/cards.ts'
 import type { Db } from '#src/db.ts'
 import type { Post } from '#src/post.ts'
 import { reason, retry, send } from '#src/send.ts'
@@ -49,7 +49,7 @@ export class Scheduler {
 	/** Разбор после рестарта, до первого тика. */
 	async recover(): Promise<void> {
 		for (const id of this.#db.recoverPublishing())
-			await this.#cards.show(id).catch(log('recover card failed'))
+			await this.#cards.failure(id).catch(log('recover card failed'))
 
 		const overdue = this.#db.unscheduleOverdue(GRACE)
 
@@ -111,7 +111,7 @@ export class Scheduler {
 			this.#sleep,
 		).catch(async (e: unknown) => {
 			this.#db.failed(post.id, reason(e))
-			await this.#cards.show(post.id).catch(log('failure card failed'))
+			await this.#cards.failure(post.id).catch(log('failure card failed'))
 
 			return null
 		})
@@ -119,15 +119,8 @@ export class Scheduler {
 		if (!ids) return
 
 		this.#db.published(post.id, ids[0])
-		const url = channelLink(this.#cfg.channelId, ids[0])
-
-		// Пост уже вышел: сбой уведомления или карточки состояние не меняет.
-		try {
-			await this.#notify(url ? `Вышло: ${url}` : 'Вышло.')
-			await this.#cards.hide(post.id)
-		} catch (e) {
-			console.error('publish notice failed', e)
-		}
+		// Пост уже вышел: сбой карточки состояние не меняет.
+		await this.#cards.show(post.id).catch(log('published card failed'))
 	}
 
 	async #nudge(): Promise<void> {

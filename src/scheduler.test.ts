@@ -19,16 +19,11 @@ function setup() {
 	const clock = { t: NOW }
 	const db = new Db(':memory:', () => clock.t)
 	const cfg = { ownerId: OWNER, channelId: CHANNEL }
-	const scheduler = new Scheduler(
-		fake.api,
-		db,
-		new Cards(fake.api, db, cfg),
-		cfg,
-		async () => {},
-	)
+	const cards = new Cards(fake.api, db, cfg)
+	const scheduler = new Scheduler(fake.api, db, cards, cfg, async () => {})
 	const post = db.create({ rubric: 'девлог', text: 'Пост' })
 
-	return { fake, clock, db, scheduler, post }
+	return { fake, clock, db, scheduler, post, cards }
 }
 
 const toChannel = (fake: ReturnType<typeof fakeBot>) =>
@@ -49,12 +44,30 @@ test('publishes when the time comes', async () => {
 	await scheduler.tick()
 	assert.equal(toChannel(fake).length, 1)
 	assert.equal(db.get(post.id).status, 'published')
+	// Вместо «Вышло» карточка сама становится опубликованной.
+	assert.ok(!toOwner(fake).some((t) => t.startsWith('Вышло')))
+	const [card] = fake.named('sendMessage').filter((p) => p.chat_id === OWNER)
+	const kb = JSON.stringify(card.reply_markup)
 
-	assert.ok(
-		toOwner(fake).some((t) =>
-			t.startsWith('Вышло: https://t.me/aimuzov_peeshet/'),
-		),
-	)
+	assert.match(kb, /опубликован/)
+	assert.match(kb, /https:\/\/t.me\/aimuzov_peeshet\//)
+	assert.equal(db.card(post.id)?.msgId !== undefined, true)
+	assert.equal(fake.named('deleteMessages').length, 0)
+})
+
+test('publishing edits the existing card in place', async () => {
+	const { fake, db, scheduler, post, cards } = setup()
+
+	db.schedule(post.id, NOW)
+	await cards.show(post.id)
+	const msgId = db.card(post.id)?.msgId
+
+	await scheduler.tick()
+	assert.equal(toOwner(fake).length, 1) // только сама карточка
+	const [edit] = fake.named('editMessageText')
+
+	assert.equal(edit.message_id, msgId)
+	assert.match(JSON.stringify(edit.reply_markup), /Открыть в канале/)
 })
 
 test('sends exactly once through retries', async () => {
@@ -91,9 +104,19 @@ test('failure is reported with the reason', async () => {
 
 	await scheduler.tick()
 	assert.equal(db.get(post.id).status, 'failed')
-	const status = toOwner(fake).find((t) => t.startsWith('#девлог · не вышел'))
+	const owner = fake.named('sendMessage').filter((p) => p.chat_id === OWNER)
 
-	assert.match(String(status), /Forbidden/)
+	assert.match(JSON.stringify(owner[0].reply_markup), /не вышел/)
+
+	assert.equal(
+		owner[1].text,
+		'Не вышел: Forbidden: bot is not a member of the channel chat',
+	)
+
+	assert.equal(
+		(owner[1].reply_parameters as { message_id: number }).message_id,
+		db.card(post.id)?.msgId,
+	)
 })
 
 test('recover: stuck posts fail, overdue ones go back to drafts', async () => {
@@ -110,6 +133,7 @@ test('recover: stuck posts fail, overdue ones go back to drafts', async () => {
 	await scheduler.tick()
 	assert.equal(toChannel(fake).length, 0)
 	assert.ok(toOwner(fake).some((t) => t.includes('не вышли вовремя')))
+	assert.ok(toOwner(fake).some((t) => t.startsWith('Не вышел: Сервер упал')))
 })
 
 test('nudges once when nobody takes the inbox', async () => {
@@ -197,7 +221,7 @@ const reply = (p: Record<string, unknown>) => ({
 	text: p.text,
 })
 
-test('a failing «Вышло» notice does not undo the publication', async () => {
+test('a failing card after publishing does not undo the publication', async () => {
 	const { fake, db, scheduler, post } = setup()
 	const restore = quiet()
 

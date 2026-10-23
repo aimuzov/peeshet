@@ -1,9 +1,15 @@
 // Всё, что владелец делает в боте. Кнопки сервер обрабатывает сам, а текст, где нужен LLM,
 // складывает во входящие для сессии Claude Code на маке.
 
-import { Composer, GrammyError, type Context } from 'grammy'
+import { Composer, type Context } from 'grammy'
 
-import { dateMenu, deleteMenu, statusLine, type Cards } from '#src/cards.ts'
+import {
+	dateMenu,
+	deleteMenu,
+	notModified,
+	statusLine,
+	type Cards,
+} from '#src/cards.ts'
 import type { Db } from '#src/db.ts'
 import { Invalid, NotFound } from '#src/post.ts'
 import { nextFreeSlot, todayAt, tomorrowAt } from '#src/time.ts'
@@ -30,14 +36,7 @@ async function swapMarkup(
 	try {
 		await ctx.editMessageReplyMarkup({ reply_markup })
 	} catch (e) {
-		if (
-			e instanceof GrammyError &&
-			e.error_code === 400 &&
-			e.description.includes('message is not modified')
-		)
-			return
-
-		throw e
+		if (!notModified(e)) throw e
 	}
 }
 
@@ -63,7 +62,7 @@ export function handlers({
 		if (!posts.length) return void (await ctx.reply('Очередь пуста.'))
 
 		const lines = posts.map(
-			(p) => `${p.id}. ${statusLine({ ...p, error: null })}`,
+			(p) => `${p.id}. ${statusLine(p, db.media(p.id).length)}`,
 		)
 		const kb = posts.map((p) => [
 			{ text: `Открыть ${p.id}`, callback_data: `o:${p.id}` },
@@ -81,6 +80,13 @@ export function handlers({
 		const now = db.now()
 
 		switch (action) {
+			// Строка статуса: кнопка ради текста, нажимать её незачем.
+			case 'n':
+				return
+
+			case 'a':
+				return cards.album(id)
+
 			case 'o':
 				return cards.show(id)
 
@@ -156,8 +162,13 @@ export function handlers({
 	bot.on('callback_query:data', async (ctx) => {
 		const [action, rawId, arg] = ctx.callbackQuery.data.split(':')
 
-		// Любая кнопка, кроме ожидающих текста, отменяет прежний вопрос.
-		if (action !== 'e' && !(action === 's' && arg === 'custom')) awaiting = null
+		// Любая кнопка, кроме ожидающих текста и строки статуса, отменяет прежний вопрос.
+		if (
+			action !== 'n' &&
+			action !== 'e' &&
+			!(action === 's' && arg === 'custom')
+		)
+			awaiting = null
 
 		try {
 			const notice = await act(action, Number(rawId), arg, ctx)

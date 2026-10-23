@@ -43,9 +43,17 @@ const SCHEMA = [
 		post_id INTEGER NOT NULL REFERENCES posts(id),
 		file_id TEXT NOT NULL
 	)`,
-	`CREATE TABLE IF NOT EXISTS previews (
+	// Прежняя схема карточки из нескольких сообщений, в базе разработки могла остаться.
+	'DROP TABLE IF EXISTS previews',
+	`CREATE TABLE IF NOT EXISTS cards (
+		post_id INTEGER PRIMARY KEY REFERENCES posts(id),
+		msg_id INTEGER NOT NULL UNIQUE,
+		kind TEXT NOT NULL
+	)`,
+	`CREATE TABLE IF NOT EXISTS extras (
 		msg_id INTEGER PRIMARY KEY,
-		post_id INTEGER NOT NULL REFERENCES posts(id)
+		post_id INTEGER NOT NULL REFERENCES posts(id),
+		kind TEXT NOT NULL
 	)`,
 	`CREATE TABLE IF NOT EXISTS inbox (
 		id INTEGER PRIMARY KEY,
@@ -78,6 +86,12 @@ export type NewPost = {
 	sources?: string[]
 	imagePrompt?: string | null
 }
+
+/** Чем карточка показана в чате: правкой текст в фото не превратить. */
+export type CardKind = 'text' | 'photo'
+export type Card = { msgId: number; kind: CardKind }
+/** Сообщения вокруг карточки: превью альбома и уведомление о сбое. */
+export type ExtraKind = 'album' | 'error'
 
 type Row = Record<string, SQLInputValue>
 
@@ -347,36 +361,67 @@ export class Db {
 		return rows.map((r) => String(r.file_id))
 	}
 
-	/** Запоминает сообщения карточки; прежние возвращает, чтобы их удалить. */
-	setPreview(id: number, msgIds: number[]): number[] {
-		return this.#tx(() => {
-			const old = this.previewIds(id)
+	card(id: number): Card | null {
+		const row = this.#db
+			.prepare('SELECT msg_id, kind FROM cards WHERE post_id = ?')
+			.get(id) as Row | undefined
 
-			this.#db.prepare('DELETE FROM previews WHERE post_id = ?').run(id)
-
-			for (const msgId of msgIds) {
-				this.#db
-					.prepare('INSERT INTO previews (msg_id, post_id) VALUES (?, ?)')
-					.run(msgId, id)
-			}
-
-			return old
-		})
+		return row
+			? { msgId: Number(row.msg_id), kind: row.kind as CardKind }
+			: null
 	}
 
-	previewIds(id: number): number[] {
+	setCard(id: number, msgId: number, kind: CardKind): void {
+		this.#db
+			.prepare(
+				`INSERT INTO cards (post_id, msg_id, kind) VALUES (?, ?, ?)
+				ON CONFLICT (post_id) DO UPDATE SET msg_id = excluded.msg_id, kind = excluded.kind`,
+			)
+			.run(id, msgId, kind)
+	}
+
+	dropCard(id: number): void {
+		this.#db.prepare('DELETE FROM cards WHERE post_id = ?').run(id)
+	}
+
+	addExtra(id: number, msgId: number, kind: ExtraKind): void {
+		this.#db
+			.prepare('INSERT INTO extras (msg_id, post_id, kind) VALUES (?, ?, ?)')
+			.run(msgId, id, kind)
+	}
+
+	extras(id: number, kind?: ExtraKind): number[] {
 		const rows = this.#db
-			.prepare('SELECT msg_id FROM previews WHERE post_id = ? ORDER BY msg_id')
-			.all(id) as Row[]
+			.prepare(
+				'SELECT msg_id FROM extras WHERE post_id = ? AND (? IS NULL OR kind = ?) ORDER BY msg_id',
+			)
+			.all(id, kind ?? null, kind ?? null) as Row[]
 
 		return rows.map((r) => Number(r.msg_id))
 	}
 
-	/** Пост, к карточке которого относится сообщение. */
+	/** Забывает сообщения вокруг карточки и возвращает их, чтобы удалить. */
+	takeExtras(id: number, kind?: ExtraKind): number[] {
+		return this.#tx(() => {
+			const ids = this.extras(id, kind)
+
+			this.#db
+				.prepare(
+					'DELETE FROM extras WHERE post_id = ? AND (? IS NULL OR kind = ?)',
+				)
+				.run(id, kind ?? null, kind ?? null)
+
+			return ids
+		})
+	}
+
+	/** Пост, к карточке которого относится сообщение: сама карточка или сообщение рядом. */
 	byPreview(msgId: number): Post | null {
 		const row = this.#db
-			.prepare('SELECT post_id FROM previews WHERE msg_id = ?')
-			.get(msgId) as Row | undefined
+			.prepare(
+				'SELECT post_id FROM cards WHERE msg_id = ? UNION SELECT post_id FROM extras WHERE msg_id = ?',
+			)
+			.get(msgId, msgId) as Row | undefined
 
 		return row ? this.get(Number(row.post_id)) : null
 	}
