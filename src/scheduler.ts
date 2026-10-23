@@ -119,8 +119,12 @@ export class Scheduler {
 		if (!ids) return
 
 		this.#db.published(post.id, ids[0])
+
 		// Пост уже вышел: сбой карточки состояние не меняет.
-		await this.#cards.show(post.id).catch(log('published card failed'))
+		// Карточку повторяем при 429 и обрыве: иначе она застрянет в «публикуется».
+		await retry(() => this.#cards.show(post.id), this.#sleep).catch(
+			log('published card failed'),
+		)
 	}
 
 	async #nudge(): Promise<void> {

@@ -54,6 +54,19 @@ test('status line', () => {
 	)
 
 	assert.equal(statusLine(post, 1), statusLine(post))
+
+	const long = db.create({
+		rubric: 'девлог',
+		text: 'x',
+		voice: 100,
+		projects: ['sorebody-frontend', 'peeshet-server', 'infra-server', 'thinks'],
+	})
+	const line = statusLine(long, 3)
+
+	// Кнопка не резиновая: строка статуса не длиннее 64 символов.
+	assert.equal(line.length, 64)
+	assert.ok(line.startsWith('#девлог · черновик · голос 100 · sorebody'))
+	assert.ok(line.endsWith('… · альбом, 3 фото'))
 	// Ошибка уходит отдельным сообщением, в кнопку статуса её не пишем.
 	assert.equal(statusLine({ ...post, error: 'boom' }), statusLine(post))
 })
@@ -313,7 +326,12 @@ test('failure edits the card and replies with the reason', async () => {
 		msgId,
 	)
 
-	// Следующая удачная отрисовка убирает уведомление.
+	// Пока пост не вышел, перерисовка («Назад», обновление) уведомление не трогает.
+	await cards.show(post.id)
+	assert.equal(deleted(fake).length, 0)
+	assert.equal(db.extras(post.id, 'error').length, 1)
+
+	// После переноса уведомление больше не нужно.
 	db.unschedule(post.id)
 	await cards.show(post.id)
 	assert.equal(deleted(fake).length, 1)
@@ -346,4 +364,86 @@ test('failure notice is sent even when the card cannot be drawn', async () => {
 	assert.equal(fake.named('sendMessage').at(-1)?.text, 'Не вышел: Forbidden')
 	assert.equal(fake.named('sendMessage').at(-1)?.reply_parameters, undefined)
 	assert.equal(db.byPreview(5000)?.id, post.id)
+})
+
+test('concurrent renders of one post leave exactly one card', async () => {
+	const { fake, db, cards, post } = setup()
+
+	await cards.show(post.id)
+	const old = db.card(post.id)?.msgId
+
+	db.addMedia(post.id, 'f1')
+
+	await Promise.all([
+		cards.show(post.id),
+		cards.show(post.id),
+		cards.show(post.id),
+	])
+
+	assert.equal(fake.named('sendPhoto').length, 1)
+	assert.equal(fake.named('editMessageMedia').length, 2)
+	assert.deepEqual(deleted(fake), [old])
+	assert.equal(db.card(post.id)?.kind, 'photo')
+})
+
+test('a queued render reads the post when its turn comes', async () => {
+	const { fake, db, cards, post } = setup()
+	let release = () => {}
+	const gate = new Promise<void>((resolve) => (release = resolve))
+
+	fake.answer('sendMessage', async (p) => {
+		await gate
+
+		return {
+			message_id: 3000,
+			date: 0,
+			chat: { id: p.chat_id, type: 'private' },
+			text: p.text,
+		}
+	})
+
+	db.schedule(post.id, NOW)
+	const first = cards.show(post.id)
+	const second = cards.show(post.id)
+
+	db.claim(post.id)
+	db.published(post.id, 55)
+	release()
+	await Promise.all([first, second])
+	assert.equal(fake.named('sendMessage').length, 1)
+
+	assert.match(
+		JSON.stringify(fake.named('editMessageText').at(-1)?.reply_markup),
+		/опубликован/,
+	)
+})
+
+test('an extra that failed to delete is retried on the next render', async () => {
+	const { fake, db, cards, post } = setup()
+	const restore = quiet()
+
+	await cards.show(post.id)
+	db.addExtra(post.id, 900, 'album')
+	fake.fail('deleteMessages', apiError('deleteMessages', 500, 'boom'))
+	await cards.show(post.id)
+	assert.deepEqual(db.extras(post.id), [900])
+	await cards.show(post.id)
+	restore()
+	assert.deepEqual(db.extras(post.id), [])
+	assert.equal(fake.named('deleteMessages').length, 2)
+})
+
+test('an extra that is already gone is forgotten', async () => {
+	const { fake, db, cards, post } = setup()
+
+	await cards.show(post.id)
+	db.addExtra(post.id, 900, 'album')
+
+	fake.fail(
+		'deleteMessages',
+		apiError('deleteMessages', 400, 'Bad Request: message to delete not found'),
+	)
+
+	await cards.show(post.id)
+	assert.deepEqual(db.extras(post.id), [])
 })

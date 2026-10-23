@@ -9,7 +9,13 @@ import {
 } from 'grammy'
 import type { InlineKeyboardButton } from 'grammy/types'
 
-import { STATUS_RU, type Card, type CardKind, type Db } from '#src/db.ts'
+import {
+	STATUS_RU,
+	type Card,
+	type CardKind,
+	type Db,
+	type ExtraKind,
+} from '#src/db.ts'
 import type { Post } from '#src/post.ts'
 import { formatMsk, todayAt } from '#src/time.ts'
 
@@ -21,22 +27,32 @@ export const channelLink = (channelId: string, msgId: number) =>
 		? `https://t.me/${channelId.slice(1)}/${msgId}`
 		: null
 
+const STATUS_LIMIT = 64
+const SEP = ' · '
+
 export function statusLine(post: Post, media = 0): string {
 	const when =
 		post.status === 'scheduled' && post.publishAt
 			? ` на ${formatMsk(post.publishAt)}`
 			: ''
-	const parts = [
+	const head = [
 		`#${post.rubric}`,
 		`${STATUS_RU[post.status]}${when}`,
 		`голос ${post.voice ?? '—'}`,
-	]
+	].join(' · ')
+	const tail = media > 1 ? ` · альбом, ${media} фото` : ''
+	const projects = [...post.projects.join(', ')]
+	// Строка живёт в кнопке: длинный список проектов обрезаем, остальное важнее.
+	const room = STATUS_LIMIT - head.length - tail.length - SEP.length
 
-	if (post.projects.length) parts.push(post.projects.join(', '))
+	if (!projects.length || room < 2) return head + tail
 
-	if (media > 1) parts.push(`альбом, ${media} фото`)
+	const fit =
+		projects.length > room
+			? `${projects.slice(0, room - 1).join('')}…`
+			: projects.join('')
 
-	return parts.join(' · ')
+	return head + SEP + fit + tail
 }
 
 type Button = InlineKeyboardButton
@@ -126,6 +142,7 @@ export class Cards {
 	readonly #api: Api
 	readonly #db: Db
 	readonly #cfg: CardsConfig
+	readonly #queue = new Map<number, Promise<void>>()
 
 	constructor(api: Api, db: Db, cfg: CardsConfig) {
 		this.#api = api
@@ -134,7 +151,88 @@ export class Cards {
 	}
 
 	/** Перерисовывает карточку на месте; новую присылает, только если старую не поправить. */
-	async show(id: number): Promise<void> {
+	show(id: number): Promise<void> {
+		return this.#serial(id, () => this.#show(id))
+	}
+
+	/** Карточка показывает только первое фото, а весь альбом присылаем по кнопке. */
+	album(id: number): Promise<void> {
+		return this.#serial(id, async () => {
+			const post = this.#db.get(id)
+			const media = this.#db.media(id)
+
+			if (media.length < 2) return
+
+			await this.#clean(id, 'album')
+			const msgs = await this.#api.sendMediaGroup(
+				this.#cfg.ownerId,
+				media.map((fileId, i) =>
+					InputMediaBuilder.photo(
+						fileId,
+						i === 0 ? { caption: post.text } : {},
+					),
+				),
+				this.#replyTo(id),
+			)
+
+			for (const m of msgs) this.#db.addExtra(id, m.message_id, 'album')
+		})
+	}
+
+	/**
+	 * Пост не вышел: карточка показывает это сама, а причина приходит отдельным ответом
+	 * на неё, чтобы владелец получил уведомление.
+	 */
+	failure(id: number): Promise<void> {
+		return this.#serial(id, async () => {
+			await this.#show(id).catch((e: unknown) =>
+				console.error('failure card failed', e),
+			)
+
+			// Прежнее уведомление заменяем новым.
+			await this.#clean(id, 'error')
+			const { error } = this.#db.get(id)
+			const msg = await this.#api.sendMessage(
+				this.#cfg.ownerId,
+				`Не вышел: ${error ?? 'причина неизвестна'}`,
+				this.#replyTo(id),
+			)
+
+			this.#db.addExtra(id, msg.message_id, 'error')
+		})
+	}
+
+	/** Убирает карточку, например у удалённого поста. */
+	hide(id: number): Promise<void> {
+		return this.#serial(id, async () => {
+			const card = this.#db.card(id)
+			const extras = this.#db.extras(id)
+			const ids = [...(card ? [card.msgId] : []), ...extras]
+
+			this.#db.dropCard(id)
+
+			if (ids.length && (await this.#delete(ids))) this.#db.dropExtras(extras)
+		})
+	}
+
+	/**
+	 * Показы одного поста идут по очереди: параллельные апдейты иначе пришлют несколько
+	 * карточек, а в базе останется одна. Пост читается уже в своей очереди, а не при вызове.
+	 */
+	#serial(id: number, step: () => Promise<void>): Promise<void> {
+		const run = (this.#queue.get(id) ?? Promise.resolve()).then(step, step)
+		const tail = run.catch(() => {})
+
+		this.#queue.set(id, tail)
+
+		void tail.then(() => {
+			if (this.#queue.get(id) === tail) this.#queue.delete(id)
+		})
+
+		return run
+	}
+
+	async #show(id: number): Promise<void> {
 		const post = this.#db.get(id)
 		const media = this.#db.media(id)
 		const kind: CardKind = media.length ? 'photo' : 'text'
@@ -153,63 +251,22 @@ export class Cards {
 						reply_markup,
 					})
 				: await this.#api.sendMessage(owner, post.text, { reply_markup })
+			const old = this.#db.setCard(id, msg.message_id, kind)
 
-			this.#db.setCard(id, msg.message_id, kind)
-
-			if (card) await this.#delete([card.msgId])
+			if (old !== null && old !== msg.message_id) await this.#delete([old])
 		}
 
-		await this.#delete(this.#db.takeExtras(id))
+		await this.#clean(id, 'album')
+
+		// Пока пост не вышел, причина нужна владельцу и после перерисовки.
+		if (post.status !== 'failed') await this.#clean(id, 'error')
 	}
 
-	/** Карточка показывает только первое фото, а весь альбом присылаем по кнопке. */
-	async album(id: number): Promise<void> {
-		const post = this.#db.get(id)
-		const media = this.#db.media(id)
+	/** Удаляет сообщения вокруг карточки; забывает их, только когда в чате их уже нет. */
+	async #clean(id: number, kind?: ExtraKind): Promise<void> {
+		const ids = this.#db.extras(id, kind)
 
-		if (media.length < 2) return
-
-		await this.#delete(this.#db.takeExtras(id, 'album'))
-		const msgs = await this.#api.sendMediaGroup(
-			this.#cfg.ownerId,
-			media.map((fileId, i) =>
-				InputMediaBuilder.photo(fileId, i === 0 ? { caption: post.text } : {}),
-			),
-			this.#replyTo(id),
-		)
-
-		for (const m of msgs) this.#db.addExtra(id, m.message_id, 'album')
-	}
-
-	/**
-	 * Пост не вышел: карточка показывает это сама, а причина приходит отдельным ответом
-	 * на неё, чтобы владелец получил уведомление.
-	 */
-	async failure(id: number): Promise<void> {
-		await this.show(id).catch((e: unknown) =>
-			console.error('failure card failed', e),
-		)
-
-		const { error } = this.#db.get(id)
-		const msg = await this.#api.sendMessage(
-			this.#cfg.ownerId,
-			`Не вышел: ${error ?? 'причина неизвестна'}`,
-			this.#replyTo(id),
-		)
-
-		this.#db.addExtra(id, msg.message_id, 'error')
-	}
-
-	/** Убирает карточку, например у удалённого поста. */
-	async hide(id: number): Promise<void> {
-		const card = this.#db.card(id)
-
-		this.#db.dropCard(id)
-
-		await this.#delete([
-			...(card ? [card.msgId] : []),
-			...this.#db.takeExtras(id),
-		])
+		if (ids.length && (await this.#delete(ids))) this.#db.dropExtras(ids)
 	}
 
 	#replyTo(id: number) {
@@ -266,14 +323,19 @@ export class Cards {
 		return true
 	}
 
-	async #delete(msgIds: number[]): Promise<void> {
-		if (!msgIds.length) return
-
+	/** `true`, если сообщений в чате больше нет или их уже не удалить. */
+	async #delete(msgIds: number[]): Promise<boolean> {
 		try {
 			await this.#api.deleteMessages(this.#cfg.ownerId, msgIds)
+
+			return true
 		} catch (e) {
 			// 400: старше 48 часов или уже удалено, это не повод ронять показ.
-			if (!is400(e)) console.error('card cleanup failed', e)
+			if (is400(e)) return true
+
+			console.error('card cleanup failed', e)
+
+			return false
 		}
 	}
 }

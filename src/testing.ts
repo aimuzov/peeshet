@@ -61,7 +61,7 @@ const EDITS = new Set([
 /**
  * Бот с подменённым транспортом: вызовы Bot API не уходят в сеть, а копятся в `calls`.
  *
- * Метод без своего ответа из `answer` отвечает сообщением с новым `message_id`,
+ * Ответ из `answer` может быть промисом: так тест придерживает вызов. Метод без своего ответа отвечает сообщением с новым `message_id`,
  * `sendMediaGroup` — массивом сообщений по числу фото, правки `editMessage*` — тем же
  * сообщением. `fail` роняет следующие вызовы метода заданными ошибками по очереди.
  */
@@ -96,7 +96,7 @@ export function fakeBot() {
 		const answer = answers.get(method)
 		let result: unknown
 
-		if (answer) result = answer(p)
+		if (answer) result = await answer(p)
 		else if (method === 'sendMediaGroup')
 			result = (p.media as unknown[]).map(() => message(p))
 		else if (method === 'sendPhoto')

@@ -174,19 +174,21 @@ test('card and extra messages map back to their post', () => {
 	const post = draft(db)
 
 	assert.equal(db.card(post.id), null)
-	db.setCard(post.id, 10, 'text')
+	assert.equal(db.setCard(post.id, 10, 'text'), null)
 	assert.deepEqual(db.card(post.id), { msgId: 10, kind: 'text' })
 	db.addExtra(post.id, 11, 'album')
 	db.addExtra(post.id, 12, 'error')
 	assert.equal(db.byPreview(10)?.id, post.id)
 	assert.equal(db.byPreview(11)?.id, post.id)
-	db.setCard(post.id, 20, 'photo')
+	// Возвращает прежнее сообщение карточки, чтобы удалить именно его.
+	assert.equal(db.setCard(post.id, 20, 'photo'), 10)
 	assert.equal(db.byPreview(10), null)
 	assert.deepEqual(db.card(post.id), { msgId: 20, kind: 'photo' })
-	assert.deepEqual(db.takeExtras(post.id, 'album'), [11])
+	assert.deepEqual(db.extras(post.id, 'album'), [11])
+	assert.deepEqual(db.extras(post.id), [11, 12])
+	db.dropExtras([11])
 	assert.equal(db.byPreview(11), null)
-	assert.deepEqual(db.takeExtras(post.id), [12])
-	assert.deepEqual(db.takeExtras(post.id), [])
+	assert.deepEqual(db.extras(post.id), [12])
 	db.dropCard(post.id)
 	assert.equal(db.card(post.id), null)
 	assert.equal(db.byPreview(20), null)
@@ -284,6 +286,28 @@ test('inbox keeps the source message and ack returns it', () => {
 	assert.equal(b.srcMsgId, null)
 	assert.equal(db.take()?.srcMsgId, 42)
 	assert.equal(db.ack(a.id).srcMsgId, 42)
+})
+
+test('legacy photo items never reach the session', () => {
+	const dir = mkdtempSync(join(tmpdir(), 'peeshet-'))
+	const path = join(dir, 'p.db')
+
+	new Db(path, () => NOW).push('message', null, 'привет')
+	const raw = new DatabaseSync(path)
+	const legacy = `INSERT INTO inbox (kind, text, created_at) VALUES ('photo', NULL, ${NOW})`
+
+	raw.exec(legacy)
+	raw.close()
+
+	// Старая запись разбирается при открытии, новая — пропускается при выдаче.
+	const db = new Db(path, () => NOW + 600)
+
+	new DatabaseSync(path).exec(legacy)
+	assert.equal(db.untaken(120).length, 1)
+	assert.equal(db.take()?.text, 'привет')
+	assert.equal(db.take(), null)
+	assert.deepEqual(db.untaken(0), [])
+	rmSync(dir, { recursive: true })
 })
 
 test('push rejects an unknown post', () => {

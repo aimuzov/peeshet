@@ -67,6 +67,9 @@ const SCHEMA = [
 	)`,
 ]
 
+// Вид входящего из прежней схемы: такие записи сессии не отдаём.
+const LEGACY_PHOTO = 'photo'
+
 // Из каких статусов пост можно править и планировать.
 const EDITABLE: Status[] = ['draft', 'scheduled', 'failed']
 
@@ -141,6 +144,13 @@ export class Db {
 
 		if (!inbox.some((c) => c.name === 'src_msg_id'))
 			this.#db.prepare('ALTER TABLE inbox ADD COLUMN src_msg_id INTEGER').run()
+
+		// Фото раньше писались во входящие событием; теперь их разбирает сервер, сессии они не нужны.
+		this.#db
+			.prepare(
+				`UPDATE inbox SET acked_at = ? WHERE kind = '${LEGACY_PHOTO}' AND acked_at IS NULL`,
+			)
+			.run(now())
 
 		this.#now = now
 	}
@@ -379,13 +389,20 @@ export class Db {
 			: null
 	}
 
-	setCard(id: number, msgId: number, kind: CardKind): void {
-		this.#db
-			.prepare(
-				`INSERT INTO cards (post_id, msg_id, kind) VALUES (?, ?, ?)
-				ON CONFLICT (post_id) DO UPDATE SET msg_id = excluded.msg_id, kind = excluded.kind`,
-			)
-			.run(id, msgId, kind)
+	/** Запоминает сообщение карточки и возвращает прежнее, чтобы удалить именно его. */
+	setCard(id: number, msgId: number, kind: CardKind): number | null {
+		return this.#tx(() => {
+			const old = this.card(id)?.msgId ?? null
+
+			this.#db
+				.prepare(
+					`INSERT INTO cards (post_id, msg_id, kind) VALUES (?, ?, ?)
+					ON CONFLICT (post_id) DO UPDATE SET msg_id = excluded.msg_id, kind = excluded.kind`,
+				)
+				.run(id, msgId, kind)
+
+			return old
+		})
 	}
 
 	dropCard(id: number): void {
@@ -408,19 +425,11 @@ export class Db {
 		return rows.map((r) => Number(r.msg_id))
 	}
 
-	/** Забывает сообщения вокруг карточки и возвращает их, чтобы удалить. */
-	takeExtras(id: number, kind?: ExtraKind): number[] {
-		return this.#tx(() => {
-			const ids = this.extras(id, kind)
+	/** Забывает сообщения вокруг карточки, когда их уже нет в чате. */
+	dropExtras(msgIds: number[]): void {
+		const del = this.#db.prepare('DELETE FROM extras WHERE msg_id = ?')
 
-			this.#db
-				.prepare(
-					'DELETE FROM extras WHERE post_id = ? AND (? IS NULL OR kind = ?)',
-				)
-				.run(id, kind ?? null, kind ?? null)
-
-			return ids
-		})
+		for (const msgId of msgIds) del.run(msgId)
 	}
 
 	/** Пост, к карточке которого относится сообщение: сама карточка или сообщение рядом. */
@@ -462,7 +471,7 @@ export class Db {
 		const t = this.#now()
 		const row = this.#db
 			.prepare(
-				'SELECT * FROM inbox WHERE acked_at IS NULL AND (taken_at IS NULL OR taken_at < ?) ORDER BY id LIMIT 1',
+				`SELECT * FROM inbox WHERE acked_at IS NULL AND kind != '${LEGACY_PHOTO}' AND (taken_at IS NULL OR taken_at < ?) ORDER BY id LIMIT 1`,
 			)
 			.get(t - reclaimAfter) as Row | undefined
 
@@ -489,7 +498,7 @@ export class Db {
 	untaken(age: number): InboxItem[] {
 		const rows = this.#db
 			.prepare(
-				'SELECT * FROM inbox WHERE taken_at IS NULL AND acked_at IS NULL AND created_at <= ? ORDER BY id',
+				`SELECT * FROM inbox WHERE taken_at IS NULL AND acked_at IS NULL AND kind != '${LEGACY_PHOTO}' AND created_at <= ? ORDER BY id`,
 			)
 			.all(this.#now() - age) as Row[]
 

@@ -70,6 +70,24 @@ test('publishing edits the existing card in place', async () => {
 	assert.match(JSON.stringify(edit.reply_markup), /Открыть в канале/)
 })
 
+test('the published card survives a transient telegram error', async () => {
+	const { fake, db, scheduler, post, cards } = setup()
+
+	db.schedule(post.id, NOW)
+	await cards.show(post.id)
+
+	fake.fail(
+		'editMessageText',
+		apiError('editMessageText', 429, 'Too Many Requests', { retry_after: 1 }),
+	)
+
+	await scheduler.tick()
+	const edits = fake.named('editMessageText')
+
+	assert.equal(edits.length, 2)
+	assert.match(JSON.stringify(edits[1].reply_markup), /опубликован/)
+})
+
 test('sends exactly once through retries', async () => {
 	const { fake, db, scheduler, post } = setup()
 
