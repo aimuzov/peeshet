@@ -28,7 +28,28 @@ export async function send(
 	return (await api.sendMediaGroup(chatId, album)).map((m) => m.message_id)
 }
 
-/** Повторяет `fn` при сетевой ошибке и 429; остальные ошибки Bot API пробрасывает сразу. */
+const NOT_SENT = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN'])
+const MAX_WAIT = 60 // секунд; дольше ждать не стоит, лучше показать ошибку
+
+/** Запрос заведомо не ушёл: соединение не установилось. */
+function neverLeft(e: HttpError): boolean {
+	for (
+		let err: unknown = e.error;
+		err && typeof err === 'object';
+		err = (err as { cause?: unknown }).cause
+	) {
+		const code = (err as { code?: unknown }).code
+
+		if (typeof code === 'string' && NOT_SENT.has(code)) return true
+	}
+
+	return false
+}
+
+/**
+ * Повторяет `fn` при 429 и когда запрос заведомо не дошёл до Telegram.
+ * Остальные сетевые ошибки не повторяются: пост мог выйти, а дубль хуже пропуска.
+ */
 export async function retry<T>(
 	fn: () => Promise<T>,
 	sleep = (ms: number) => delay(ms),
@@ -38,11 +59,13 @@ export async function retry<T>(
 			return await fn()
 		} catch (e) {
 			const tooMany = e instanceof GrammyError && e.error_code === 429
-			const network = e instanceof HttpError
+			const unsent = e instanceof HttpError && neverLeft(e)
 
-			if ((!tooMany && !network) || attempt === ATTEMPTS) throw e
+			if ((!tooMany && !unsent) || attempt === ATTEMPTS) throw e
 
 			const after = tooMany ? e.parameters.retry_after : undefined
+
+			if (after && after > MAX_WAIT) throw e
 
 			await sleep(after ? after * 1000 : PAUSE)
 		}
@@ -51,8 +74,10 @@ export async function retry<T>(
 
 /** Причина ошибки для владельца. */
 export const reason = (e: unknown) =>
-	e instanceof GrammyError
-		? e.description
-		: e instanceof Error
-			? e.message
-			: String(e)
+	e instanceof HttpError
+		? 'Связь с Telegram оборвалась, проверь канал: пост мог выйти.'
+		: e instanceof GrammyError
+			? e.description
+			: e instanceof Error
+				? e.message
+				: String(e)

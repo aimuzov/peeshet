@@ -3,7 +3,7 @@ import { test } from 'node:test'
 
 import { Cards, dateMenu, statusLine } from '#src/cards.ts'
 import { Db } from '#src/db.ts'
-import { CHANNEL, fakeBot, OWNER } from '#src/testing.ts'
+import { apiError, CHANNEL, fakeBot, OWNER } from '#src/testing.ts'
 
 // Чт 2026-10-22 12:00 МСК.
 const NOW = Date.UTC(2026, 9, 22, 9) / 1000
@@ -75,4 +75,52 @@ test('date menu hides today 19:00 once it has passed', () => {
 
 	assert.ok(buttons(dateMenu(1, NOW)).some((b) => b.text === 'Сегодня 19:00'))
 	assert.ok(!buttons(dateMenu(1, late)).some((b) => b.text === 'Сегодня 19:00'))
+})
+
+test('hide deletes the card and clears previews', async () => {
+	const { fake, db, cards } = setup()
+	const post = db.create({ rubric: 'мысль', text: 'Текст' })
+
+	await cards.show(post.id)
+	const ids = db.previewIds(post.id)
+
+	await cards.hide(post.id)
+	assert.deepEqual(fake.named('deleteMessages')[0].message_ids, ids)
+	assert.deepEqual(db.previewIds(post.id), [])
+})
+
+test('album card registers all photos and the status message', async () => {
+	const { db, cards } = setup()
+	const post = db.create({ rubric: 'мысль', text: 'Текст' })
+
+	db.addMedia(post.id, 'f1')
+	db.addMedia(post.id, 'f2')
+	await cards.show(post.id)
+	assert.equal(db.previewIds(post.id).length, 3)
+})
+
+test('a failed status message removes the orphan post and keeps the old card', async () => {
+	const { fake, db, cards } = setup()
+	const post = db.create({ rubric: 'мысль', text: 'Текст' })
+
+	await cards.show(post.id)
+	const before = db.previewIds(post.id)
+
+	let n = 0
+
+	// Первый sendMessage (сам пост) проходит, второй (статус) падает.
+	fake.answer('sendMessage', (p) => {
+		if (++n === 2) throw apiError('sendMessage', 500, 'boom')
+
+		return {
+			message_id: 5000 + n,
+			date: 0,
+			chat: { id: p.chat_id, type: 'private' },
+			text: p.text,
+		}
+	})
+
+	await assert.rejects(cards.show(post.id), /boom/)
+	assert.deepEqual(fake.named('deleteMessages').at(-1)?.message_ids, [5001])
+	assert.deepEqual(db.previewIds(post.id), before)
 })

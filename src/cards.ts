@@ -1,7 +1,7 @@
 // Карточка поста в личке владельца: сам пост ровно как в канале и строка статуса с кнопками.
 // Данные кнопок: `<действие>:<id поста>[:<аргумент>]`, разбирает их bot.ts.
 
-import { InlineKeyboard, type Api } from 'grammy'
+import { GrammyError, InlineKeyboard, type Api } from 'grammy'
 
 import { STATUS_RU, type Db } from '#src/db.ts'
 import type { Post } from '#src/post.ts'
@@ -106,13 +106,16 @@ export class Cards {
 			post.text,
 			this.#db.media(id),
 		)
-		const status = await this.#api.sendMessage(
-			this.#cfg.ownerId,
-			statusLine(post),
-			{
+		const status = await this.#api
+			.sendMessage(this.#cfg.ownerId, statusLine(post), {
 				reply_markup: keyboard(post, this.#cfg.channelId),
-			},
-		)
+			})
+			.catch(async (e: unknown) => {
+				// Без статуса у поста нет кнопок: убираем осиротевшие сообщения, прежняя карточка остаётся.
+				await this.#api.deleteMessages(this.#cfg.ownerId, ids).catch(() => {})
+
+				throw e
+			})
 
 		await this.#delete(this.#db.setPreview(id, [...ids, status.message_id]))
 	}
@@ -125,7 +128,12 @@ export class Cards {
 	async #delete(msgIds: number[]): Promise<void> {
 		if (!msgIds.length) return
 
-		// Старше 48 часов Telegram удалить не даст, это не повод ронять показ.
-		await this.#api.deleteMessages(this.#cfg.ownerId, msgIds).catch(() => {})
+		try {
+			await this.#api.deleteMessages(this.#cfg.ownerId, msgIds)
+		} catch (e) {
+			// 400: старше 48 часов или уже удалено, это не повод ронять показ.
+			if (!(e instanceof GrammyError && e.error_code === 400))
+				console.error('card cleanup failed', e)
+		}
 	}
 }

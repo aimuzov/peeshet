@@ -36,10 +36,10 @@ export const apiError = (
 	)
 
 /** Telegram не ответил вовсе. */
-export const networkError = (method: string) =>
+export const networkError = (method: string, code = 'ECONNREFUSED') =>
 	new HttpError(
 		`Network request for '${method}' failed!`,
-		new TypeError('fetch failed'),
+		Object.assign(new TypeError('fetch failed'), { cause: { code } }),
 	)
 
 const OK_TRUE = new Set([
@@ -66,7 +66,13 @@ export function fakeBot() {
 	const message = (p: Record<string, unknown>) => ({
 		message_id: ++messageId,
 		date: 0,
-		chat: { id: p.chat_id, type: 'private' },
+		chat: {
+			id: p.chat_id,
+			type:
+				typeof p.chat_id === 'string' && p.chat_id.startsWith('@')
+					? 'channel'
+					: 'private',
+		},
 		text: p.text,
 	})
 
@@ -84,6 +90,19 @@ export function fakeBot() {
 		if (answer) result = answer(p)
 		else if (method === 'sendMediaGroup')
 			result = (p.media as unknown[]).map(() => message(p))
+		else if (method === 'sendPhoto')
+			result = {
+				...message(p),
+				photo: [
+					{
+						file_id: (p.photo as string) ?? 'uploaded',
+						file_unique_id: 'u',
+						width: 1,
+						height: 1,
+					},
+				],
+				caption: p.caption,
+			}
 		else if (OK_TRUE.has(method)) result = true
 		else result = message(p)
 
@@ -97,7 +116,8 @@ export function fakeBot() {
 		named: (method: string) =>
 			calls.filter((c) => c.method === method).map((c) => c.payload),
 		answer: (method: string, fn: Answer) => answers.set(method, fn),
-		fail: (method: string, ...errors: Error[]) => failures.set(method, errors),
+		fail: (method: string, ...errors: Error[]) =>
+			failures.set(method, [...(failures.get(method) ?? []), ...errors]),
 		feed: (update: object) =>
 			bot.handleUpdate({ update_id: ++messageId, ...update } as Update),
 	}
