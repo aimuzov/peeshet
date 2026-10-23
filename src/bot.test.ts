@@ -4,22 +4,32 @@ import { test } from 'node:test'
 import { handlers } from '#src/bot.ts'
 import { Cards } from '#src/cards.ts'
 import { Db } from '#src/db.ts'
+import { Scheduler } from '#src/scheduler.ts'
 import { apiError, CHANNEL, fakeBot, OWNER, press, text } from '#src/testing.ts'
 import { mskDayStart } from '#src/time.ts'
 
 // Чт 2026-10-22 12:00 МСК.
 const NOW = Date.UTC(2026, 9, 22, 9) / 1000
 
-function setup() {
+function setup(
+	kickWith?: (deps: {
+		fake: ReturnType<typeof fakeBot>
+		db: Db
+		cards: Cards
+	}) => () => void,
+) {
 	const fake = fakeBot()
 	const clock = { t: NOW }
 	const db = new Db(':memory:', () => clock.t)
 	const cards = new Cards(fake.api, db, { ownerId: OWNER, channelId: CHANNEL })
 	let kicks = 0
+	const inner = kickWith?.({ fake, db, cards })
+	const kick = () => {
+		kicks++
+		inner?.()
+	}
 
-	fake.bot.use(
-		handlers({ db, cards, ownerId: OWNER, kick: () => void kicks++ }),
-	)
+	fake.bot.use(handlers({ db, cards, ownerId: OWNER, kick }))
 
 	const post = db.create({ rubric: 'девлог', text: 'Пост' })
 
@@ -172,13 +182,38 @@ test('queue lists drafts and scheduled posts', async () => {
 })
 
 test('a successful button press answers the callback', async () => {
-	const { fake, post } = setup()
+	const { fake, db, post } = setup()
 
+	db.schedule(post.id, NOW + 60)
 	await fake.feed(press(`u:${post.id}`))
+	assert.equal(db.get(post.id).status, 'draft')
 	assert.equal(fake.named('answerCallbackQuery').length, 1)
+	assert.equal(fake.named('answerCallbackQuery')[0].show_alert, undefined)
 })
 
-test('a 400 from editMessageReplyMarkup still answers the callback', async () => {
+test('«message is not modified» from editMessageReplyMarkup is a normal answer', async () => {
+	const { fake, post } = setup()
+
+	for (let i = 0; i < 2; i++)
+		fake.fail(
+			'editMessageReplyMarkup',
+			apiError(
+				'editMessageReplyMarkup',
+				400,
+				'Bad Request: message is not modified',
+			),
+		)
+
+	await fake.feed(press(`d:${post.id}`))
+	await fake.feed(press(`x:${post.id}`))
+	const answers = fake.named('answerCallbackQuery')
+
+	assert.equal(answers.length, 2)
+	assert.equal(answers[0].show_alert, undefined)
+	assert.equal(answers[1].show_alert, undefined)
+})
+
+test('another failure of editMessageReplyMarkup still answers the callback', async () => {
 	const { fake, post } = setup()
 	const log = console.error
 
@@ -186,11 +221,7 @@ test('a 400 from editMessageReplyMarkup still answers the callback', async () =>
 
 	fake.fail(
 		'editMessageReplyMarkup',
-		apiError(
-			'editMessageReplyMarkup',
-			400,
-			'Bad Request: message is not modified',
-		),
+		apiError('editMessageReplyMarkup', 500, 'Internal Server Error'),
 	)
 
 	await fake.feed(press(`x:${post.id}`)).catch(() => {})
@@ -275,4 +306,83 @@ test('owner messages in a group are ignored', async () => {
 
 	assert.equal(fake.calls.length, 0)
 	assert.equal(db.take(), null)
+})
+
+test('«Сейчас» leaves no card after publishing', async () => {
+	let running: Promise<void> = Promise.resolve()
+	let cardAtKick = 0
+	const { fake, db, post } = setup(({ fake, db, cards }) => {
+		const scheduler = new Scheduler(
+			fake.api,
+			db,
+			cards,
+			{ ownerId: OWNER, channelId: CHANNEL },
+			async () => {},
+		)
+
+		return () => {
+			cardAtKick = db.previewIds(db.list()[0].id).length
+			running = scheduler.tick()
+		}
+	})
+
+	await fake.feed(press(`s:${post.id}:now`))
+	await running
+	assert.ok(cardAtKick > 0) // планировщик стартует, когда карточка уже нарисована
+	assert.equal(db.get(post.id).status, 'published')
+	assert.deepEqual(db.previewIds(post.id), [])
+})
+
+test('/start replies with help and goes nowhere else', async () => {
+	const { fake, db } = setup()
+
+	await fake.feed(text('/start'))
+	assert.match(String(fake.named('sendMessage').at(-1)?.text), /Присылай идеи/)
+	assert.equal(db.take(), null)
+})
+
+test('an unknown command is not pushed to the inbox', async () => {
+	const { fake, db } = setup()
+
+	await fake.feed(text('/foo bar'))
+
+	assert.equal(
+		fake.named('sendMessage').at(-1)?.text,
+		'Не знаю такой команды. /queue — очередь.',
+	)
+
+	assert.equal(db.take(), null)
+})
+
+test('a photo is kept even when the card refresh fails', async () => {
+	const { fake, db, post } = setup()
+	const log = console.error
+
+	console.error = () => {}
+	db.setPreview(post.id, [600])
+	fake.fail('sendMessage', apiError('sendMessage', 500, 'oops'))
+
+	await fake.feed({
+		message: {
+			message_id: 9,
+			date: 0,
+			chat: { id: OWNER, type: 'private' },
+			from: { id: OWNER, is_bot: false, first_name: 'A' },
+			photo: [{ file_id: 'big', file_unique_id: 'b', width: 9, height: 9 }],
+			reply_to_message: {
+				message_id: 600,
+				date: 0,
+				chat: { id: OWNER, type: 'private' },
+			},
+		},
+	})
+
+	console.error = log
+	assert.deepEqual(db.media(post.id), ['big'])
+	assert.equal(db.take()?.kind, 'photo')
+
+	assert.equal(
+		fake.named('sendMessage').at(-1)?.text,
+		'Фото прикрепил, а карточку обновить не вышло.',
+	)
 })

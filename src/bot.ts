@@ -1,7 +1,7 @@
 // Всё, что владелец делает в боте. Кнопки сервер обрабатывает сам, а текст, где нужен LLM,
 // складывает во входящие для сессии Claude Code на маке.
 
-import { Composer, type Context } from 'grammy'
+import { Composer, GrammyError, type Context } from 'grammy'
 
 import { dateMenu, deleteMenu, statusLine, type Cards } from '#src/cards.ts'
 import type { Db } from '#src/db.ts'
@@ -19,6 +19,27 @@ export type BotDeps = {
 // Сколько секунд после кнопки «Править» или «Своё время» ждём ответ.
 const AWAIT_TTL = 600
 const FORWARDED = 'Передал в сессию.'
+
+type Markup = Parameters<Context['editMessageReplyMarkup']>[0]
+
+/** Повторное нажатие даёт тот же набор кнопок, и Telegram отвечает 400: это не ошибка. */
+async function swapMarkup(
+	ctx: Context,
+	reply_markup: NonNullable<Markup>['reply_markup'],
+): Promise<void> {
+	try {
+		await ctx.editMessageReplyMarkup({ reply_markup })
+	} catch (e) {
+		if (
+			e instanceof GrammyError &&
+			e.error_code === 400 &&
+			e.description.includes('message is not modified')
+		)
+			return
+
+		throw e
+	}
+}
 
 export function handlers({
 	db,
@@ -66,9 +87,7 @@ export function handlers({
 			case 'd':
 				db.get(id)
 
-				return void (await ctx.editMessageReplyMarkup({
-					reply_markup: dateMenu(id, now),
-				}))
+				return void (await swapMarkup(ctx, dateMenu(id, now)))
 
 			case 's': {
 				if (arg === 'custom') {
@@ -93,9 +112,10 @@ export function handlers({
 
 				db.schedule(id, at)
 
-				if (arg === 'now') kick()
-
 				await cards.show(id)
+
+				// Тик после карточки: иначе «публикуется» нарисуется уже после того, как планировщик её убрал.
+				if (arg === 'now') kick()
 
 				return
 			}
@@ -120,9 +140,7 @@ export function handlers({
 			case 'x':
 				db.get(id)
 
-				return void (await ctx.editMessageReplyMarkup({
-					reply_markup: deleteMenu(id),
-				}))
+				return void (await swapMarkup(ctx, deleteMenu(id)))
 
 			case 'xx':
 				db.remove(id)
@@ -178,14 +196,29 @@ export function handlers({
 		}
 
 		db.push('photo', post.id, ctx.msg.caption ?? null)
-		await cards.show(post.id)
+
+		try {
+			await cards.show(post.id)
+		} catch (e) {
+			console.error('card refresh failed', e)
+			await ctx.reply('Фото прикрепил, а карточку обновить не вышло.')
+		}
 	})
+
+	bot.command('start', (ctx) =>
+		ctx.reply(
+			'Присылай идеи и правки текстом, ответом на карточку — правку к посту. /queue — очередь.',
+		),
+	)
 
 	bot.on('message:voice', (ctx) =>
 		ctx.reply('Голосовые пока не понимаю, напиши текстом.'),
 	)
 
 	bot.on('message:text', async (ctx) => {
+		if (ctx.msg.text.startsWith('/'))
+			return void (await ctx.reply('Не знаю такой команды. /queue — очередь.'))
+
 		const replyTo = ctx.msg.reply_to_message?.message_id
 		const card = replyTo ? db.byPreview(replyTo) : null
 
