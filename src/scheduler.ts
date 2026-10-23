@@ -27,6 +27,7 @@ export class Scheduler {
 	readonly #cards: Cards
 	readonly #cfg: CardsConfig
 	readonly #sleep: (ms: number) => Promise<void>
+	readonly #tickMs: number
 	#nudged = false
 
 	constructor(
@@ -35,12 +36,14 @@ export class Scheduler {
 		cards: Cards,
 		cfg: CardsConfig,
 		sleep = (ms: number) => delay(ms),
+		tickMs = TICK,
 	) {
 		this.#api = api
 		this.#db = db
 		this.#cards = cards
 		this.#cfg = cfg
 		this.#sleep = sleep
+		this.#tickMs = tickMs
 	}
 
 	/** Разбор после рестарта, до первого тика. */
@@ -90,7 +93,7 @@ export class Scheduler {
 				console.error('tick failed', e)
 			}
 
-			await delay(TICK, undefined, { signal }).catch(() => {})
+			await delay(this.#tickMs, undefined, { signal }).catch(() => {})
 		}
 	}
 
@@ -136,14 +139,16 @@ export class Scheduler {
 
 		if (this.#nudged || !this.#db.untaken(INBOX_IDLE).length) return
 
+		// Флаг до отправки: пересёкшиеся тики не пришлют два напоминания.
+		this.#nudged = true
+
 		try {
 			await this.#notify(
 				'Сессия на маке не запущена, займусь, когда запустишь.',
 			)
-
-			this.#nudged = true
 		} catch (e) {
-			// Флаг не взведён: следующий тик попробует снова.
+			// Сбросили флаг: следующий тик попробует снова.
+			this.#nudged = false
 			console.error('nudge failed', e)
 		}
 	}

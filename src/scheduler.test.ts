@@ -233,7 +233,16 @@ test('a failing card after a send failure still marks the post failed', async ()
 })
 
 test('run survives a throwing tick', async () => {
-	const { db, scheduler } = setup()
+	const { fake, db } = setup()
+	const cfg = { ownerId: OWNER, channelId: CHANNEL }
+	const scheduler = new Scheduler(
+		fake.api,
+		db,
+		new Cards(fake.api, db, cfg),
+		cfg,
+		async () => {},
+		1,
+	)
 	const restore = quiet()
 	const ctl = new AbortController()
 	let calls = 0
@@ -288,4 +297,18 @@ test('recover survives a failing card and offers «Открыть»', async () =
 
 	assert.match(kb, new RegExp(`o:${late.id}`))
 	assert.doesNotMatch(kb, /"d:/)
+})
+
+test('overlapping ticks send one nudge', async () => {
+	const { fake, clock, db, scheduler } = setup()
+
+	db.push('message', null, 'привет')
+	clock.t = NOW + 120
+	await Promise.all([scheduler.tick(), scheduler.tick()])
+
+	assert.equal(
+		toOwner(fake).filter((t) => t.includes('Сессия на маке не запущена'))
+			.length,
+		1,
+	)
 })
