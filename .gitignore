@@ -1,0 +1,12 @@
+# Глобальный ignore исключает **/.claude, а агент и команды проекта живут в репозитории.
+!/.claude/
+/.claude/*
+!/.claude/agents/
+!/.claude/commands/
+
+node_modules/
+.env
+data/
+
+# Черновики до готовности очереди в боте, локальные.
+drafts/
