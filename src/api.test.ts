@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
+import { request } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { test } from 'node:test'
 
 import { serve } from '#src/api.ts'
 import { Cards } from '#src/cards.ts'
 import { Db } from '#src/db.ts'
-import { CHANNEL, fakeBot, OWNER } from '#src/testing.ts'
+import { apiError, CHANNEL, fakeBot, OWNER } from '#src/testing.ts'
 
 const NOW = 1_790_000_000
 const TOKEN = 't'.repeat(32)
@@ -211,4 +212,153 @@ test('inbox long poll and ack', async (t) => {
 		(await call('POST', `/api/inbox/${json.item.id}/ack`)).status,
 		200,
 	)
+})
+
+const quiet = () => {
+	const log = console.error
+
+	console.error = () => {}
+
+	return () => void (console.error = log)
+}
+
+test('a failing card refresh does not fail the request', async (t) => {
+	const { fake, db, server, call } = await setup()
+	const restore = quiet()
+
+	t.after(() => server.close())
+	// Первая карточка (текст) не уйдёт.
+	fake.fail('sendMessage', apiError('sendMessage', 400, 'Bad Request'))
+
+	const created = await call('POST', '/api/posts', {
+		rubric: 'мысль',
+		text: 'x',
+	})
+
+	assert.equal(created.status, 201)
+	assert.equal(created.json.card, false)
+	assert.equal(db.list().length, 1)
+
+	const ok = await call('POST', `/api/posts/${created.json.id}/preview`)
+
+	restore()
+	assert.equal(ok.status, 200)
+	assert.equal(ok.json.card, true)
+})
+
+test('a telegram error on upload is a 502 with its description', async (t) => {
+	const { fake, db, server, call } = await setup()
+
+	t.after(() => server.close())
+	fake.fail('sendPhoto', apiError('sendPhoto', 400, 'Bad Request: bad photo'))
+
+	const { json } = await call('POST', '/api/posts', {
+		rubric: 'мысль',
+		text: 'x',
+	})
+	const res = await call(
+		'POST',
+		`/api/posts/${json.id}/media`,
+		new Uint8Array([1]),
+		{ 'content-type': 'image/png' },
+	)
+
+	assert.equal(res.status, 502)
+	assert.equal(res.json.error, 'Bad Request: bad photo')
+	assert.deepEqual(db.media(json.id), [])
+})
+
+test('schedule needs an explicit utc offset', async (t) => {
+	const { server, call } = await setup()
+
+	t.after(() => server.close())
+	const { json } = await call('POST', '/api/posts', {
+		rubric: 'мысль',
+		text: 'x',
+	})
+	const url = `/api/posts/${json.id}/schedule`
+
+	for (const at of ['2026-10-24T12:00:00', '2026-10-24', 'tomorrow']) {
+		const res = await call('POST', url, { at })
+
+		assert.equal(res.status, 400, at)
+	}
+
+	assert.match(
+		(await call('POST', url, { at: '2026-10-24T12:00:00' })).json.error,
+		/часовым поясом/,
+	)
+
+	const msk = await call('POST', url, { at: '2026-10-24T12:00:00+03:00' })
+	const utc = await call('POST', url, { at: '2026-10-24T09:00:00Z' })
+
+	assert.equal(msk.status, 200)
+	assert.equal(msk.json.publishAt, utc.json.publishAt)
+})
+
+test('a body over the limit is a 413', async (t) => {
+	const { server, base, call } = await setup()
+
+	t.after(() => server.close())
+	const { json } = await call('POST', '/api/posts', {
+		rubric: 'мысль',
+		text: 'x',
+	})
+	const path = `/api/posts/${json.id}/media`
+	const headers = {
+		authorization: `Bearer ${TOKEN}`,
+		'content-type': 'image/png',
+	}
+	const send = (extra: Record<string, string>, chunks: number) =>
+		new Promise<{ status: number; connection?: string }>((resolve, reject) => {
+			const req = request(
+				base + path,
+				{ method: 'POST', headers: { ...headers, ...extra } },
+				(res) => {
+					res.resume()
+
+					resolve({
+						status: res.statusCode ?? 0,
+						connection: res.headers.connection,
+					})
+				},
+			)
+
+			req.on('error', reject)
+
+			// Заголовок объявляет большое тело, но само оно не уходит.
+			for (let i = 0; i < chunks; i++) req.write(Buffer.alloc(1024 * 1024))
+
+			if (chunks) req.end()
+			else req.flushHeaders()
+		})
+
+	const declared = await send({ 'content-length': String(11 * 1024 * 1024) }, 0)
+
+	assert.equal(declared.status, 413)
+	assert.equal(declared.connection, 'close')
+
+	// Без content-length: переполнение ловится по ходу чтения.
+	const streamed = await send({ 'transfer-encoding': 'chunked' }, 11)
+
+	assert.equal(streamed.status, 413)
+})
+
+test('a doomed upload never reaches the owner chat', async (t) => {
+	const { fake, server, call } = await setup()
+
+	t.after(() => server.close())
+	const { json } = await call('POST', '/api/posts', {
+		rubric: 'мысль',
+		text: 'a'.repeat(2000),
+	})
+	const res = await call(
+		'POST',
+		`/api/posts/${json.id}/media`,
+		new Uint8Array([1]),
+		{ 'content-type': 'image/png' },
+	)
+
+	assert.equal(res.status, 400)
+	assert.equal(fake.named('sendPhoto').length, 0)
 })

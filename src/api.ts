@@ -8,11 +8,12 @@ import {
 	type ServerResponse,
 } from 'node:http'
 import { setTimeout as delay } from 'node:timers/promises'
-import { InputFile, type Api } from 'grammy'
+import { GrammyError, InputFile, type Api } from 'grammy'
 
 import type { Cards } from '#src/cards.ts'
 import type { Db } from '#src/db.ts'
 import {
+	checkLimits,
 	Invalid,
 	isRubric,
 	NotFound,
@@ -33,8 +34,11 @@ export type ApiDeps = {
 	pollStep?: number
 }
 
-const MAX_BODY = 20 * 1024 * 1024
+// Столько же принимает sendPhoto.
+const MAX_BODY = 10 * 1024 * 1024
 const MAX_WAIT = 25
+// Без явного пояса Date.parse берёт пояс сервера, а он не всегда московский.
+const OFFSET = /(Z|[+-]\d\d:\d\d)$/
 
 class ApiError extends Error {
 	readonly status: number
@@ -47,20 +51,39 @@ class ApiError extends Error {
 
 const notFound = () => new ApiError(404, 'Нет такого адреса.')
 
-const reply = (res: ServerResponse, status: number, body: unknown) => {
-	res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+const reply = (
+	res: ServerResponse,
+	status: number,
+	body: unknown,
+	headers: Record<string, string> = {},
+) => {
+	res.writeHead(status, {
+		'content-type': 'application/json; charset=utf-8',
+		...headers,
+	})
+
 	res.end(JSON.stringify(body))
 }
 
+const TOO_BIG = 'Слишком большое тело запроса.'
+
 async function readBody(req: IncomingMessage): Promise<Buffer> {
+	// Заведомо большое тело не читаем вовсе: соединение закроется после ответа.
+	if (Number(req.headers['content-length']) > MAX_BODY)
+		throw new ApiError(413, TOO_BIG)
+
 	const chunks: Buffer[] = []
 	let size = 0
 
 	for await (const chunk of req) {
 		size += chunk.length
 
-		if (size > MAX_BODY)
-			throw new ApiError(413, 'Слишком большое тело запроса.')
+		if (size > MAX_BODY) {
+			// Дочитываем в никуда, иначе клиент не получит ответ.
+			req.resume()
+
+			throw new ApiError(413, TOO_BIG)
+		}
 
 		chunks.push(chunk)
 	}
@@ -130,14 +153,34 @@ export function serve(deps: ApiDeps): Server {
 		revisions: db.revisions(post.id),
 	})
 
+	/** Запись уже сделана: сбой карточки не должен превращаться в ошибку запроса. */
+	async function refresh(id: number): Promise<boolean> {
+		try {
+			await cards.show(id)
+
+			return true
+		} catch (e) {
+			console.error('card refresh failed', e)
+
+			return false
+		}
+	}
+
 	async function scheduleAt(id: number, req: IncomingMessage): Promise<number> {
 		const body = await readJson(req)
 
 		if (body.slot === 'next')
 			return nextFreeSlot(db.now(), db.get(id).rubric, db.scheduledTimes())
 
-		if (isString(body.at) && !Number.isNaN(Date.parse(body.at)))
-			return Math.floor(Date.parse(body.at) / 1000)
+		if (isString(body.at)) {
+			if (!OFFSET.test(body.at))
+				throw new Invalid(
+					'Время нужно с часовым поясом, например 2026-10-24T12:00:00+03:00.',
+				)
+
+			if (!Number.isNaN(Date.parse(body.at)))
+				return Math.floor(Date.parse(body.at) / 1000)
+		}
 
 		throw new Invalid('Нужен at (ISO-время) или slot: "next".')
 	}
@@ -146,11 +189,20 @@ export function serve(deps: ApiDeps): Server {
 		if (!(req.headers['content-type'] ?? '').startsWith('image/'))
 			throw new Invalid('Нужен Content-Type image/*.')
 
-		db.get(id)
+		// Заранее: негодный пост не должен получить картинку в личку владельцу.
+		const post = db.editable(id)
+
+		checkLimits(post.text, db.media(id).length + 1)
 		const bytes = await readBody(req)
 		// Bot API отдаёт file_id только у отправленного файла, поэтому картинка уходит
 		// владельцу и сразу удаляется: дальше пост ссылается на file_id.
-		const msg = await api.sendPhoto(ownerId, new InputFile(bytes, 'image'))
+		const msg = await api
+			.sendPhoto(ownerId, new InputFile(bytes, 'image'))
+			.catch((e: unknown) => {
+				if (e instanceof GrammyError) throw new ApiError(502, e.description)
+
+				throw e
+			})
 		const fileId = msg.photo?.at(-1)?.file_id
 
 		await api.deleteMessage(ownerId, msg.message_id).catch(() => {})
@@ -197,9 +249,10 @@ export function serve(deps: ApiDeps): Server {
 				imagePrompt: optional(body.imagePrompt, isString, 'imagePrompt'),
 			})
 
-			await cards.show(post.id)
-
-			return reply(res, 201, full(post))
+			return reply(res, 201, {
+				...full(post),
+				card: await refresh(post.id),
+			})
 		}
 
 		if (method === 'GET' && !action) return reply(res, 200, full(db.get(id)))
@@ -235,9 +288,9 @@ export function serve(deps: ApiDeps): Server {
 			throw notFound()
 		}
 
-		await cards.show(id)
+		const card = await refresh(id)
 
-		return reply(res, 200, full(db.get(id)))
+		return reply(res, 200, { ...full(db.get(id)), card })
 	}
 
 	async function inbox(
@@ -307,7 +360,12 @@ export function serve(deps: ApiDeps): Server {
 	const server = createServer((req, res) => {
 		route(req, res).catch((e) => {
 			if (e instanceof ApiError)
-				return reply(res, e.status, { error: e.message })
+				return reply(
+					res,
+					e.status,
+					{ error: e.message },
+					e.status === 413 ? { connection: 'close' } : {},
+				)
 
 			if (e instanceof Invalid) return reply(res, 400, { error: e.message })
 

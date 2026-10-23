@@ -1,4 +1,5 @@
 import { join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { run } from '@grammyjs/runner'
 import { Bot } from 'grammy'
 
@@ -47,7 +48,7 @@ runner.task()?.catch((e) => {
 	process.exit(1)
 })
 
-scheduler.run(stop.signal).catch((e) => {
+const loop = scheduler.run(stop.signal).catch((e) => {
 	console.error('scheduler died', e)
 	process.exit(1)
 })
@@ -56,6 +57,8 @@ const shutdown = async () => {
 	stop.abort()
 	http.close()
 	await runner.stop()
+	// Дожидаемся текущей публикации, чтобы пост не остался в publishing, но не дольше 10 с.
+	await Promise.race([loop, delay(10_000)])
 	process.exit(0)
 }
 
