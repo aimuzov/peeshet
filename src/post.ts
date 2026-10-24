@@ -20,6 +20,8 @@ export type Post = {
 	sources: string[]
 	imagePrompt: string | null
 	error: string | null
+	/** Telegram уже принял текущий текст: карточка с ним показалась. */
+	validated: boolean
 	createdAt: number
 	updatedAt: number
 }

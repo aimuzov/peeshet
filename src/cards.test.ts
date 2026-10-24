@@ -384,7 +384,12 @@ test('revise saves the text and edits the card', async () => {
 	const { fake, db, cards, post } = setup()
 
 	await cards.show(post.id)
-	assert.equal(await cards.revise(post.id, (t) => `${t}, дополнен`), true)
+
+	assert.deepEqual(await cards.revise(post.id, (t) => `${t}, дополнен`), {
+		card: true,
+		validated: true,
+	})
+
 	assert.equal(db.get(post.id).text, 'Текст, дополнен')
 
 	assert.deepEqual(
@@ -450,15 +455,21 @@ test('a card that fails for another reason keeps the new text', async () => {
 	const shown = await cards.revise(post.id, () => 'Новый')
 
 	restore()
-	assert.equal(shown, false)
+	assert.deepEqual(shown, { card: false, validated: false })
 	assert.equal(db.get(post.id).text, 'Новый')
+	assert.equal(db.get(post.id).validated, false)
 })
 
 test('create shows the card of the new post', async () => {
 	const { fake, db, cards } = setup()
-	const { post, card } = await cards.create({ rubric: 'релиз', text: 'Вышло' })
+	const { post, card, validated } = await cards.create({
+		rubric: 'релиз',
+		text: 'Вышло',
+	})
 
 	assert.equal(card, true)
+	assert.equal(validated, true)
+	assert.equal(post.validated, true)
 	assert.equal(db.get(post.id).text, 'Вышло')
 	assert.ok(db.card(post.id))
 	assert.equal(fake.named('sendRichMessage').length, 1)
@@ -488,10 +499,14 @@ test('a chat error keeps a new post in the queue', async () => {
 	const restore = quiet()
 
 	fake.fail('sendRichMessage', chatNotFound('sendRichMessage'))
-	const { post, card } = await cards.create({ rubric: 'релиз', text: 'Вышло' })
+	const { post, card, validated } = await cards.create({
+		rubric: 'релиз',
+		text: 'Вышло',
+	})
 
 	restore()
 	assert.equal(card, false)
+	assert.equal(validated, false)
 	assert.equal(db.get(post.id).status, 'draft')
 	assert.ok(db.list().some((p) => p.id === post.id))
 })
@@ -503,10 +518,10 @@ test('a chat error keeps the revised text', async () => {
 	await cards.show(post.id)
 	fake.fail('editMessageText', chatNotFound('editMessageText'))
 	fake.fail('sendRichMessage', chatNotFound('sendRichMessage'))
-	const card = await cards.revise(post.id, () => 'Новый')
+	const shown = await cards.revise(post.id, () => 'Новый')
 
 	restore()
-	assert.equal(card, false)
+	assert.deepEqual(shown, { card: false, validated: false })
 	assert.equal(db.get(post.id).text, 'Новый')
 })
 
@@ -528,4 +543,60 @@ test('a photo telegram cannot use is a content rejection', async () => {
 	)
 
 	assert.equal(db.get(post.id).text, 'Текст')
+})
+
+test('a shown card marks its text as validated', async () => {
+	const { db, cards, post } = setup()
+
+	assert.equal(db.get(post.id).validated, false)
+	await cards.show(post.id)
+	assert.equal(db.get(post.id).validated, true)
+	db.setText(post.id, 'Другой')
+	assert.equal(db.get(post.id).validated, false)
+})
+
+test('revert goes through telegram and comes back if it is rejected', async () => {
+	const { fake, db, cards } = setup()
+	const post = db.create({ rubric: 'мысль', text: 'Формула $$' })
+
+	db.setText(post.id, 'Норм')
+	const before = db.revisions(post.id)
+
+	fake.rejectMarkup('$$')
+	await assert.rejects(cards.revert(post.id), rejection)
+	assert.equal(db.get(post.id).text, 'Норм')
+	assert.deepEqual(db.revisions(post.id), before)
+})
+
+test('revert shows the previous text', async () => {
+	const { fake, db, cards, post } = setup()
+
+	db.setText(post.id, 'Второй')
+	assert.deepEqual(await cards.revert(post.id), { card: true, validated: true })
+	assert.equal(db.get(post.id).text, 'Текст')
+	assert.equal(rich(fake.named('sendRichMessage')[0]).markdown, 'Текст')
+	await assert.rejects(cards.revert(post.id), /ревизий/)
+})
+
+test('validate checks only a text telegram has not seen', async () => {
+	const { fake, db, cards } = setup()
+	const restore = quiet()
+	const bad = db.create({ rubric: 'мысль', text: 'Формула $$' })
+	const offline = db.create({ rubric: 'мысль', text: 'Норм' })
+
+	fake.rejectMarkup('$$')
+	await assert.rejects(cards.validate(bad.id), rejection)
+	assert.equal(db.get(bad.id).text, 'Формула $$')
+
+	// Telegram недоступен: проверить нечем, планированию это не мешает.
+	fake.fail('sendRichMessage', apiError('sendRichMessage', 500, 'boom'))
+	await cards.validate(offline.id)
+	assert.equal(db.get(offline.id).validated, false)
+	await cards.validate(offline.id)
+	assert.equal(db.get(offline.id).validated, true)
+	const calls = fake.calls.length
+
+	await cards.validate(offline.id)
+	restore()
+	assert.equal(fake.calls.length, calls)
 })

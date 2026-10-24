@@ -597,3 +597,16 @@ test('a photo whose paragraph telegram rejects is rolled back', async () => {
 	// Фото владельца остаётся: в пост оно не попало.
 	assert.equal(fake.named('deleteMessage').length, 0)
 })
+
+test('a date preset refuses a text telegram rejects', async () => {
+	const { fake, db } = setup()
+	const bad = db.create({ rubric: 'мысль', text: 'Формула $$' })
+
+	fake.rejectMarkup('$$')
+	await fake.feed(press(`s:${bad.id}:tomorrow`))
+	const answer = fake.named('answerCallbackQuery').at(-1)
+
+	assert.equal(answer?.show_alert, true)
+	assert.match(String(answer?.text), /не принял разметку/)
+	assert.equal(db.get(bad.id).status, 'draft')
+})

@@ -280,7 +280,7 @@ export function serve(deps: ApiDeps): Server {
 			const text = body.text as string | undefined
 
 			// Текст первым: его проверяет Telegram, и при отказе мета не должна остаться записанной.
-			if (text !== undefined) card = await cards.revise(id, () => text)
+			if (text !== undefined) card = (await cards.revise(id, () => text)).card
 
 			// Мета меняет строку статуса, поэтому карточку тогда рисуем ещё раз.
 			if (
@@ -291,9 +291,13 @@ export function serve(deps: ApiDeps): Server {
 				card = undefined
 			}
 		} else if (method === 'POST' && action === 'revert') {
-			db.revert(id)
+			card = (await cards.revert(id)).card
 		} else if (method === 'POST' && action === 'schedule') {
-			db.schedule(id, await scheduleAt(id, req))
+			const at = await scheduleAt(id, req)
+
+			db.editable(id)
+			await cards.validate(id)
+			db.schedule(id, at)
 		} else if (method === 'POST' && action === 'unschedule') {
 			db.unschedule(id)
 		} else if (method === 'POST' && action === 'media') {

@@ -276,6 +276,7 @@ test('a failing card refresh does not fail the request', async (t) => {
 
 	assert.equal(created.status, 201)
 	assert.equal(created.json.card, false)
+	assert.equal(created.json.validated, false)
 	assert.equal(db.list().length, 1)
 
 	const ok = await call('POST', `/api/posts/${created.json.id}/preview`)
@@ -283,6 +284,7 @@ test('a failing card refresh does not fail the request', async (t) => {
 	restore()
 	assert.equal(ok.status, 200)
 	assert.equal(ok.json.card, true)
+	assert.equal(ok.json.validated, true)
 })
 
 test('a telegram error on upload is a 502 with its description', async (t) => {
@@ -469,4 +471,58 @@ test('patch saves text and meta together and links only known photos', async (t)
 	assert.equal(ok.json.card, true)
 	assert.equal(ok.json.text, 'v2\n\n![](tg://photo?id=p1)')
 	assert.equal(ok.json.voice, 91)
+})
+
+test('schedule and revert do not let rejected markup into the queue', async (t) => {
+	const { fake, db, server, call } = await setup()
+
+	t.after(() => server.close())
+	// Текст, который Telegram ещё не видел: так бывает после сбоя связи.
+	const post = db.create({ rubric: 'мысль', text: 'Формула $$' })
+
+	fake.rejectMarkup('$$')
+	const scheduled = await call('POST', `/api/posts/${post.id}/schedule`, {
+		slot: 'next',
+	})
+
+	assert.equal(scheduled.status, 400)
+
+	assert.equal(
+		scheduled.json.error,
+		`Telegram не принял разметку: ${MARKUP_ERROR}`,
+	)
+
+	assert.equal(db.get(post.id).status, 'draft')
+
+	db.setText(post.id, 'Норм')
+	const reverted = await call('POST', `/api/posts/${post.id}/revert`)
+
+	assert.equal(reverted.status, 400)
+	assert.match(reverted.json.error, /не принял разметку/)
+	assert.equal(db.get(post.id).text, 'Норм')
+	assert.equal(db.revisions(post.id).length, 1)
+	assert.equal((await call('POST', `/api/posts/${post.id}/revert`)).status, 400)
+	db.revert(post.id)
+	assert.equal((await call('POST', `/api/posts/${post.id}/revert`)).status, 400)
+})
+
+test('a post created while telegram is down can still be scheduled', async (t) => {
+	const { fake, db, server, call } = await setup()
+	const log = console.error
+
+	t.after(() => server.close())
+	console.error = () => {}
+	fake.fail('sendRichMessage', apiError('sendRichMessage', 500, 'boom'))
+	fake.fail('sendRichMessage', apiError('sendRichMessage', 500, 'boom'))
+	const { json } = await call('POST', '/api/posts', {
+		rubric: 'мысль',
+		text: 'x',
+	})
+	const res = await call('POST', `/api/posts/${json.id}/schedule`, {
+		slot: 'next',
+	})
+
+	console.error = log
+	assert.equal(res.status, 200)
+	assert.equal(db.get(json.id).status, 'scheduled')
 })

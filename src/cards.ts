@@ -12,6 +12,9 @@ import { formatMsk, todayAt } from '#src/time.ts'
 
 export type CardsConfig = { ownerId: number; channelId: string }
 
+/** Итог показа после записи: пришла ли карточка и принял ли Telegram текущий текст. */
+export type Shown = { card: boolean; validated: boolean }
+
 /** Ссылка на пост в канале; у канала без username её нет. */
 export const channelLink = (channelId: string, msgId: number) =>
 	channelId.startsWith('@')
@@ -167,25 +170,62 @@ export class Cards {
 	 * Меняет текст поста и показывает его в карточке. Разметку проверяет Telegram: если он
 	 * не принял новый текст, правка откатывается, а наружу уходит {@link Invalid} с его
 	 * причиной. `change` получает текст уже в очереди поста, поэтому дописывания по очереди
-	 * не теряют друг друга. `false` — текст сохранён, а карточку обновить не вышло.
+	 * не теряют друг друга.
 	 */
-	revise(id: number, change: (text: string) => string): Promise<boolean> {
+	revise(id: number, change: (text: string) => string): Promise<Shown> {
 		return this.#serial(id, async () => {
-			this.#db.setText(id, change(this.#db.get(id).text))
+			const before = this.#db.get(id)
+
+			this.#db.setText(id, change(before.text))
 			const [revision] = this.#db.revisions(id)
 
-			return this.#validated(id, () => this.#db.undoText(id, revision.id))
+			return this.#validated(id, () =>
+				this.#db.undoText(id, revision.id, before.validated),
+			)
+		})
+	}
+
+	/** Откат к прошлой ревизии, проверенный так же: прошлый текст Telegram мог и не видеть. */
+	revert(id: number): Promise<Shown> {
+		return this.#serial(id, async () => {
+			const before = this.#db.get(id)
+			const [last] = this.#db.revisions(id)
+
+			this.#db.revert(id)
+
+			return this.#validated(id, () =>
+				this.#db.undoRevert(id, last, before.text, before.validated),
+			)
 		})
 	}
 
 	/** Заводит пост и показывает его карточку; пост с негодной разметкой сразу удаляется. */
-	async create(p: NewPost): Promise<{ post: Post; card: boolean }> {
-		const post = this.#db.create(p)
-		const card = await this.#serial(post.id, () =>
-			this.#validated(post.id, () => this.#db.remove(post.id)),
+	async create(p: NewPost): Promise<Shown & { post: Post }> {
+		const { id } = this.#db.create(p)
+		const shown = await this.#serial(id, () =>
+			this.#validated(id, () => this.#db.remove(id)),
 		)
 
-		return { post, card }
+		return { ...shown, post: this.#db.get(id) }
+	}
+
+	/**
+	 * Перед планированием: текст, которого Telegram ещё не видел, проверяем показом карточки.
+	 * Отказ — {@link Invalid}; сбой связи планированию не мешает, текст останется непроверенным.
+	 */
+	validate(id: number): Promise<void> {
+		return this.#serial(id, async () => {
+			if (this.#db.get(id).validated) return
+
+			try {
+				await this.#show(id)
+			} catch (e) {
+				if (rejected(e))
+					throw new Invalid(`Telegram не принял разметку: ${e.description}`)
+
+				console.error('card check failed', e)
+			}
+		})
 	}
 
 	/** Выполняет `fn` в очереди поста: например, публикацию, пока правка ещё проверяется. */
@@ -247,16 +287,16 @@ export class Cards {
 	}
 
 	/** Показывает карточку после записи; если Telegram не принял разметку, `undo` её отменяет. */
-	async #validated(id: number, undo: () => void): Promise<boolean> {
+	async #validated(id: number, undo: () => void): Promise<Shown> {
 		try {
 			await this.#show(id)
 
-			return true
+			return { card: true, validated: this.#db.get(id).validated }
 		} catch (e) {
 			if (!rejected(e)) {
 				console.error('card refresh failed', e)
 
-				return false
+				return { card: false, validated: this.#db.get(id).validated }
 			}
 
 			undo()
@@ -284,8 +324,10 @@ export class Cards {
 			})
 			const old = this.#db.setCard(id, msgId)
 
+			this.#db.markValidated(id, post.text)
+
 			if (old !== null && old !== msgId) await this.#delete([old])
-		}
+		} else this.#db.markValidated(id, post.text)
 
 		// Пока пост не вышел, причина нужна владельцу и после перерисовки.
 		if (post.status !== 'failed') await this.#clean(id, 'error')

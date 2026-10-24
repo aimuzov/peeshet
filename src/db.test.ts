@@ -432,3 +432,35 @@ test('undoText leaves a published post alone', () => {
 	assert.equal(db.get(post.id).text, 'v2')
 	assert.equal(db.revisions(post.id).length, 1)
 })
+
+test('validated marks only the current text', () => {
+	const { db } = open()
+	const post = draft(db, 'v1')
+
+	assert.equal(post.validated, false)
+	db.markValidated(post.id, 'старый')
+	assert.equal(db.get(post.id).validated, false)
+	db.markValidated(post.id, 'v1')
+	assert.equal(db.get(post.id).validated, true)
+	db.setText(post.id, 'v2')
+	assert.equal(db.get(post.id).validated, false)
+	db.markValidated(post.id, 'v2')
+	db.revert(post.id)
+	assert.equal(db.get(post.id).validated, false)
+})
+
+test('posts without the validated column get it on open', () => {
+	const dir = mkdtempSync(join(tmpdir(), 'peeshet-'))
+	const path = join(dir, 'p.db')
+	const raw = new DatabaseSync(path)
+
+	for (const sql of [
+		`CREATE TABLE posts (id INTEGER PRIMARY KEY, rubric TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, publish_at INTEGER, channel_msg_id INTEGER, voice INTEGER, projects TEXT NOT NULL DEFAULT '[]', sources TEXT NOT NULL DEFAULT '[]', image_prompt TEXT, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+		`INSERT INTO posts (rubric, text, status, created_at, updated_at) VALUES ('мысль', 'x', 'published', 1, 1)`,
+	])
+		raw.prepare(sql).run()
+
+	raw.close()
+	assert.equal(new Db(path, () => NOW).get(1).validated, false)
+	rmSync(dir, { recursive: true })
+})

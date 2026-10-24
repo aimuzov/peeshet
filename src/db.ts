@@ -43,7 +43,8 @@ const SCHEMA = [
 		image_prompt TEXT,
 		error TEXT,
 		created_at INTEGER NOT NULL,
-		updated_at INTEGER NOT NULL
+		updated_at INTEGER NOT NULL,
+		validated INTEGER NOT NULL DEFAULT 0
 	)`,
 	'CREATE INDEX IF NOT EXISTS posts_status ON posts(status, publish_at)',
 	`CREATE TABLE IF NOT EXISTS revisions (
@@ -102,6 +103,7 @@ export type Card = { msgId: number }
 export type ExtraKind = 'error'
 
 export type Media = { key: string; fileId: string }
+export type Revision = { id: number; text: string; createdAt: number }
 
 type Row = Record<string, SQLInputValue>
 
@@ -120,6 +122,7 @@ const toPost = (r: Row): Post => ({
 	sources: JSON.parse(String(r.sources)),
 	imagePrompt: str(r.image_prompt),
 	error: str(r.error),
+	validated: Number(r.validated) === 1,
 	createdAt: Number(r.created_at),
 	updatedAt: Number(r.updated_at),
 })
@@ -148,6 +151,13 @@ export class Db {
 		// В базе разработки inbox могла остаться без этой колонки.
 		if (!this.#columns('inbox').includes('src_msg_id'))
 			this.#db.prepare('ALTER TABLE inbox ADD COLUMN src_msg_id INTEGER').run()
+
+		if (!this.#columns('posts').includes('validated'))
+			this.#db
+				.prepare(
+					'ALTER TABLE posts ADD COLUMN validated INTEGER NOT NULL DEFAULT 0',
+				)
+				.run()
 
 		// Фото без ключей из базы разработки в текст не вставить, их проще забыть.
 		if (!this.#columns('media').includes('key')) {
@@ -232,7 +242,7 @@ export class Db {
 				)
 				.run(id, post.text, this.#now())
 
-			return this.#update(id, { text })
+			return this.#update(id, { text, validated: 0 })
 		})
 	}
 
@@ -257,7 +267,7 @@ export class Db {
 	}
 
 	/** Прошлые версии текста, последняя первой. */
-	revisions(id: number): { id: number; text: string; createdAt: number }[] {
+	revisions(id: number): Revision[] {
 		const rows = this.#db
 			.prepare(
 				'SELECT id, text, created_at FROM revisions WHERE post_id = ? ORDER BY id DESC',
@@ -282,7 +292,7 @@ export class Db {
 			checkLimits(last.text, this.#keys(id))
 			this.#db.prepare('DELETE FROM revisions WHERE id = ?').run(last.id)
 
-			return this.#update(id, { text: last.text })
+			return this.#update(id, { text: last.text, validated: 0 })
 		})
 	}
 
@@ -291,7 +301,7 @@ export class Db {
 	 * забирает её. `false` — отменять уже нечего или нельзя: ревизии нет, пост вышел или
 	 * выходит. Это не ошибка запроса: владелец и так узнает, что Telegram правку не принял.
 	 */
-	undoText(id: number, revisionId: number): boolean {
+	undoText(id: number, revisionId: number, validated = false): boolean {
 		return this.#tx(() => {
 			const row = this.#db
 				.prepare('SELECT text FROM revisions WHERE id = ? AND post_id = ?')
@@ -300,10 +310,47 @@ export class Db {
 			if (!this.#undoable(id, row !== undefined)) return false
 
 			this.#db.prepare('DELETE FROM revisions WHERE id = ?').run(revisionId)
-			this.#update(id, { text: String(row?.text) })
+
+			this.#update(id, {
+				text: String(row?.text),
+				validated: Number(validated),
+			})
 
 			return true
 		})
+	}
+
+	/** Отменяет откат, который не принял Telegram: ревизия возвращается в историю как была. */
+	undoRevert(
+		id: number,
+		revision: Revision,
+		text: string,
+		validated: boolean,
+	): boolean {
+		return this.#tx(() => {
+			const taken = this.#db
+				.prepare('SELECT 1 FROM revisions WHERE id = ?')
+				.get(revision.id)
+
+			if (!this.#undoable(id, !taken)) return false
+
+			this.#db
+				.prepare(
+					'INSERT INTO revisions (id, post_id, text, created_at) VALUES (?, ?, ?, ?)',
+				)
+				.run(revision.id, id, revision.text, revision.createdAt)
+
+			this.#update(id, { text, validated: Number(validated) })
+
+			return true
+		})
+	}
+
+	/** Отмечает, что Telegram принял текст `text`, если он всё ещё текущий. */
+	markValidated(id: number, text: string): void {
+		this.#db
+			.prepare('UPDATE posts SET validated = 1 WHERE id = ? AND text = ?')
+			.run(id, text)
 	}
 
 	schedule(id: number, at: number): Post {
@@ -558,7 +605,7 @@ export class Db {
 		if (found && EDITABLE.includes(status)) return true
 
 		console.error(
-			`post ${id}: undo skipped (${found ? status : 'revision is gone'})`,
+			`post ${id}: undo skipped (${found ? status : 'revision conflict'})`,
 		)
 
 		return false

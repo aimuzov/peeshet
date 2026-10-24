@@ -9,6 +9,7 @@ import {
 	notModified,
 	statusLine,
 	type Cards,
+	type Shown,
 } from '#src/cards.ts'
 import type { Db } from '#src/db.ts'
 import { Invalid, NotFound } from '#src/post.ts'
@@ -154,6 +155,8 @@ export function handlers({
 
 				if (at === undefined) throw new Invalid('Не понял кнопку.')
 
+				db.editable(id)
+				await cards.validate(id)
 				db.schedule(id, at)
 
 				await cards.show(id)
@@ -237,7 +240,7 @@ export function handlers({
 		if (!best) return
 
 		const caption = ctx.msg.caption
-		let shown: boolean
+		let shown: Shown
 
 		try {
 			const { key } = db.addMedia(post.id, best.file_id)
@@ -252,7 +255,7 @@ export function handlers({
 			return void (await ctx.reply(e.message))
 		}
 
-		if (!shown)
+		if (!shown.card)
 			return void (await ctx.reply(
 				'Фото прикрепил, а карточку обновить не вышло.',
 			))
