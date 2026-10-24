@@ -15,8 +15,10 @@ import {
 
 const NOW = 1_790_000_000
 
+let replyId = 2000
+
 const reply = (p: Record<string, unknown>) => ({
-	message_id: 2000,
+	message_id: ++replyId,
 	date: 0,
 	chat: { id: p.chat_id, type: 'private' },
 	rich_message: p.rich_message,
@@ -411,4 +413,36 @@ test('publishing waits for a revise in flight and sends its final text', async (
 	assert.deepEqual(toChannel(fake).map(markdown), ['Пост'])
 	assert.equal(db.get(post.id).status, 'published')
 	assert.equal(db.revisions(post.id).length, 0)
+})
+
+test('overdue buttons name posts in plain text', async () => {
+	const { fake, clock, db, scheduler } = setup()
+	const md = db.create({
+		rubric: 'мысль',
+		text: '# Заголовок **жирный** [ссылка](https://example.com)\n\nдальше',
+	})
+	const pic = db.create({ rubric: 'мысль', text: 'x' })
+
+	db.addMedia(pic.id, 'f1')
+
+	db.setText(
+		pic.id,
+		'![](tg://photo?id=p1 "подпись")\n\n> _Цитата_ с `кодом` и длинным хвостом',
+	)
+
+	db.schedule(md.id, NOW)
+	db.schedule(pic.id, NOW)
+	clock.t = NOW + 3600
+	await scheduler.recover()
+	const markup = fake.named('sendMessage').at(-1)?.reply_markup as {
+		inline_keyboard: { text: string }[][]
+	}
+
+	assert.deepEqual(
+		markup.inline_keyboard
+			.flat()
+			.map((b) => b.text)
+			.filter((t) => t.startsWith('Сейчас: ')),
+		['Сейчас: Заголовок жирный ссылка', 'Сейчас: Цитата с кодом и длинным…'],
+	)
 })

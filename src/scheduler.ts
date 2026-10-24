@@ -15,9 +15,25 @@ const GRACE = 300
 // Через сколько секунд невзятое входящее значит, что сессия на маке не запущена.
 const INBOX_IDLE = 120
 
-/** Начало текста поста для кнопки. */
-const title = (post: Post) =>
-	post.text.length > 24 ? `${post.text.slice(0, 24)}…` : post.text
+const TITLE = 24
+
+/** Строка текста без Markdown: картинки уходят, от ссылок остаётся текст. */
+const plain = (line: string) =>
+	line
+		.replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+		.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+		.replace(/^\s*(#+|>)\s*/, '')
+		.replace(/[*_`~]/g, '')
+		.trim()
+
+/** Начало текста поста для кнопки: первая непустая строка без разметки. */
+function title(post: Post): string {
+	const line = [...(post.text.split('\n').map(plain).find(Boolean) ?? '')]
+
+	return line.length > TITLE
+		? `${line.slice(0, TITLE).join('')}…`
+		: line.join('')
+}
 
 const log = (what: string) => (e: unknown) => console.error(what, e)
 
