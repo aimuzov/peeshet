@@ -13,6 +13,15 @@ import {
 	type Status,
 } from '#src/post.ts'
 
+// Ключ фото — его имя в тексте поста: `![](tg://photo?id=p1)`.
+const MEDIA = `CREATE TABLE IF NOT EXISTS media (
+	id INTEGER PRIMARY KEY,
+	post_id INTEGER NOT NULL REFERENCES posts(id),
+	key TEXT NOT NULL,
+	file_id TEXT NOT NULL,
+	UNIQUE (post_id, key)
+)`
+
 const SCHEMA = [
 	'PRAGMA journal_mode = WAL',
 	'PRAGMA foreign_keys = ON',
@@ -38,11 +47,7 @@ const SCHEMA = [
 		text TEXT NOT NULL,
 		created_at INTEGER NOT NULL
 	)`,
-	`CREATE TABLE IF NOT EXISTS media (
-		id INTEGER PRIMARY KEY,
-		post_id INTEGER NOT NULL REFERENCES posts(id),
-		file_id TEXT NOT NULL
-	)`,
+	MEDIA,
 	// Прежняя схема карточки из нескольких сообщений, в базе разработки могла остаться.
 	'DROP TABLE IF EXISTS previews',
 	`CREATE TABLE IF NOT EXISTS cards (
@@ -97,6 +102,8 @@ export type Card = { msgId: number; kind: CardKind }
 /** Сообщения вокруг карточки: превью альбома и уведомление о сбое. */
 export type ExtraKind = 'album' | 'error'
 
+export type Media = { key: string; fileId: string }
+
 type Row = Record<string, SQLInputValue>
 
 const num = (v: SQLInputValue) => (v === null ? null : Number(v))
@@ -140,10 +147,14 @@ export class Db {
 		for (const sql of SCHEMA) this.#db.prepare(sql).run()
 
 		// В базе разработки inbox могла остаться без этой колонки.
-		const inbox = this.#db.prepare('PRAGMA table_info(inbox)').all() as Row[]
-
-		if (!inbox.some((c) => c.name === 'src_msg_id'))
+		if (!this.#columns('inbox').includes('src_msg_id'))
 			this.#db.prepare('ALTER TABLE inbox ADD COLUMN src_msg_id INTEGER').run()
+
+		// Фото без ключей из базы разработки в текст не вставить, их проще забыть.
+		if (!this.#columns('media').includes('key')) {
+			this.#db.prepare('DROP TABLE media').run()
+			this.#db.prepare(MEDIA).run()
+		}
 
 		// Фото раньше писались во входящие событием; теперь их разбирает сервер, сессии они не нужны.
 		this.#db
@@ -357,26 +368,37 @@ export class Db {
 		return new Set(this.list(['scheduled']).map((p) => p.publishAt as number))
 	}
 
-	addMedia(id: number, fileId: string): Post {
+	/** Ключ следующего фото поста: `p` и номер на единицу больше наибольшего. */
+	nextKey(id: number): string {
+		const last = Math.max(
+			0,
+			...this.media(id).map((m) => Number(m.key.slice(1)) || 0),
+		)
+
+		return `p${last + 1}`
+	}
+
+	addMedia(id: number, fileId: string): { post: Post; key: string } {
 		return this.#tx(() => {
 			const post = this.editable(id)
+			const key = this.nextKey(id)
 
 			checkLimits(post.text, this.media(id).length + 1)
 
 			this.#db
-				.prepare('INSERT INTO media (post_id, file_id) VALUES (?, ?)')
-				.run(id, fileId)
+				.prepare('INSERT INTO media (post_id, key, file_id) VALUES (?, ?, ?)')
+				.run(id, key, fileId)
 
-			return this.#update(id, {})
+			return { post: this.#update(id, {}), key }
 		})
 	}
 
-	media(id: number): string[] {
+	media(id: number): Media[] {
 		const rows = this.#db
-			.prepare('SELECT file_id FROM media WHERE post_id = ? ORDER BY id')
+			.prepare('SELECT key, file_id FROM media WHERE post_id = ? ORDER BY id')
 			.all(id) as Row[]
 
-		return rows.map((r) => String(r.file_id))
+		return rows.map((r) => ({ key: String(r.key), fileId: String(r.file_id) }))
 	}
 
 	card(id: number): Card | null {
@@ -503,6 +525,12 @@ export class Db {
 			.all(this.#now() - age) as Row[]
 
 		return rows.map(toInbox)
+	}
+
+	#columns(table: string): string[] {
+		const rows = this.#db.prepare(`PRAGMA table_info(${table})`).all() as Row[]
+
+		return rows.map((r) => String(r.name))
 	}
 
 	#tx<T>(fn: () => T): T {

@@ -159,7 +159,7 @@ export class Cards {
 	album(id: number): Promise<void> {
 		return this.#serial(id, async () => {
 			const post = this.#db.get(id)
-			const media = this.#db.media(id)
+			const media = this.#db.media(id).map((m) => m.fileId)
 
 			if (media.length < 2) return
 
@@ -234,7 +234,7 @@ export class Cards {
 
 	async #show(id: number): Promise<void> {
 		const post = this.#db.get(id)
-		const media = this.#db.media(id)
+		const media = this.#db.media(id).map((m) => m.fileId)
 		const kind: CardKind = media.length ? 'photo' : 'text'
 		const reply_markup = keyboard(post, this.#cfg.channelId, media.length)
 		const card = this.#db.card(id)

@@ -165,8 +165,46 @@ test('media counts against caption limit', () => {
 	db.setText(post.id, 'short')
 	db.addMedia(post.id, 'f1')
 	db.addMedia(post.id, 'f2')
-	assert.deepEqual(db.media(post.id), ['f1', 'f2'])
 	assert.throws(() => db.setText(post.id, 'a'.repeat(2000)), /1024/)
+})
+
+test('photos get keys p1, p2… in their post', () => {
+	const { db } = open()
+	const post = draft(db)
+	const other = draft(db)
+	const first = db.addMedia(post.id, 'f1')
+
+	assert.equal(first.key, 'p1')
+	assert.equal(first.post.id, post.id)
+	assert.equal(db.addMedia(post.id, 'f2').key, 'p2')
+	assert.equal(db.addMedia(other.id, 'f3').key, 'p1')
+
+	assert.deepEqual(db.media(post.id), [
+		{ key: 'p1', fileId: 'f1' },
+		{ key: 'p2', fileId: 'f2' },
+	])
+})
+
+test('a media table without keys is recreated on open', () => {
+	const dir = mkdtempSync(join(tmpdir(), 'peeshet-'))
+	const path = join(dir, 'p.db')
+	const raw = new DatabaseSync(path)
+
+	for (const sql of [
+		`CREATE TABLE posts (id INTEGER PRIMARY KEY, rubric TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, publish_at INTEGER, channel_msg_id INTEGER, voice INTEGER, projects TEXT NOT NULL DEFAULT '[]', sources TEXT NOT NULL DEFAULT '[]', image_prompt TEXT, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+		`INSERT INTO posts (rubric, text, status, created_at, updated_at) VALUES ('мысль', 'x', 'draft', 1, 1)`,
+		'CREATE TABLE media (id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL REFERENCES posts(id), file_id TEXT NOT NULL)',
+		`INSERT INTO media (post_id, file_id) VALUES (1, 'old')`,
+	])
+		raw.prepare(sql).run()
+
+	raw.close()
+
+	const db = new Db(path, () => NOW)
+
+	assert.deepEqual(db.media(1), [])
+	assert.equal(db.addMedia(1, 'new').key, 'p1')
+	rmSync(dir, { recursive: true })
 })
 
 test('card and extra messages map back to their post', () => {

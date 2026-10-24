@@ -190,7 +190,9 @@ test('media upload goes through the owner chat to get a file_id', async (t) => {
 	)
 
 	assert.equal(res.status, 200)
-	assert.deepEqual(db.media(json.id), ['big'])
+	assert.equal(res.json.key, 'p1')
+	assert.deepEqual(res.json.media, [{ key: 'p1', fileId: 'big' }])
+	assert.deepEqual(db.media(json.id), [{ key: 'p1', fileId: 'big' }])
 	assert.ok(fake.named('deleteMessage').length >= 1) // служебная картинка убрана
 })
 

@@ -192,7 +192,7 @@ export function serve(deps: ApiDeps): Server {
 		throw new Invalid('Нужен at (ISO-время) или slot: "next".')
 	}
 
-	async function upload(id: number, req: IncomingMessage): Promise<void> {
+	async function upload(id: number, req: IncomingMessage): Promise<string> {
 		if (!(req.headers['content-type'] ?? '').startsWith('image/'))
 			throw new Invalid('Нужен Content-Type image/*.')
 
@@ -216,7 +216,7 @@ export function serve(deps: ApiDeps): Server {
 
 		if (!fileId) throw new ApiError(502, 'Telegram не вернул file_id.')
 
-		db.addMedia(id, fileId)
+		return db.addMedia(id, fileId).key
 	}
 
 	async function posts(
@@ -264,6 +264,8 @@ export function serve(deps: ApiDeps): Server {
 
 		if (method === 'GET' && !action) return reply(res, 200, full(db.get(id)))
 
+		let extra = {}
+
 		if (method === 'PATCH' && !action) {
 			const body = await readJson(req)
 
@@ -290,14 +292,14 @@ export function serve(deps: ApiDeps): Server {
 		} else if (method === 'POST' && action === 'unschedule') {
 			db.unschedule(id)
 		} else if (method === 'POST' && action === 'media') {
-			await upload(id, req)
+			extra = { key: await upload(id, req) }
 		} else if (!(method === 'POST' && action === 'preview')) {
 			throw notFound()
 		}
 
 		const card = await refresh(id)
 
-		return reply(res, 200, { ...full(db.get(id)), card })
+		return reply(res, 200, { ...full(db.get(id)), ...extra, card })
 	}
 
 	async function inbox(

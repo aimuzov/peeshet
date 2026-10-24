@@ -103,7 +103,7 @@ export class Scheduler {
 
 		if (!post) return
 
-		const media = this.#db.media(post.id)
+		const media = this.#db.media(post.id).map((m) => m.fileId)
 		// Ловим только ошибки отправки: если упадёт уведомление после неё, пост уже вышел,
 		// и переводить его в failed нельзя.
 		const ids = await retry(

@@ -204,7 +204,7 @@ test('photo in reply to a card is attached and the owner message removed', async
 	const update = photo('big', { replyTo: 600 })
 
 	await fake.feed(update)
-	assert.deepEqual(db.media(post.id), ['big'])
+	assert.deepEqual(db.media(post.id), [{ key: 'p1', fileId: 'big' }])
 	assert.equal(fake.named('sendPhoto')[0].photo, 'big')
 
 	assert.deepEqual(fake.named('deleteMessage'), [
@@ -224,7 +224,12 @@ test('a photo in reply to an album preview goes to that post', async () => {
 	db.setCard(post.id, 600, 'photo')
 	db.addExtra(post.id, 601, 'album')
 	await fake.feed(photo('f3', { replyTo: 601 }))
-	assert.deepEqual(db.media(post.id), ['f1', 'f2', 'f3'])
+
+	assert.deepEqual(
+		db.media(post.id).map((m) => m.fileId),
+		['f1', 'f2', 'f3'],
+	)
+
 	assert.equal(fake.named('editMessageMedia')[0].message_id, 600)
 	assert.deepEqual(db.extras(post.id), [])
 })
@@ -538,7 +543,7 @@ test('a photo is kept even when the card refresh fails', async () => {
 
 	await fake.feed(photo('big', { replyTo: 600 }))
 	console.error = log
-	assert.deepEqual(db.media(post.id), ['big'])
+	assert.deepEqual(db.media(post.id), [{ key: 'p1', fileId: 'big' }])
 	assert.equal(db.take(), null)
 	// Карточку не обновили: фото владельца остаётся, чтобы было видно, что пришло.
 	assert.equal(fake.named('deleteMessage').length, 0)
