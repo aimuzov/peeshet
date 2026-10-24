@@ -8,11 +8,14 @@ import { handlers } from '#src/bot.ts'
 import { Cards } from '#src/cards.ts'
 import { fromEnv } from '#src/config.ts'
 import { Db } from '#src/db.ts'
+import { redactConsole } from '#src/redact.ts'
 import { Scheduler } from '#src/scheduler.ts'
 
 process.on('unhandledRejection', (e) => console.error('unhandled rejection', e))
 
 const settings = fromEnv()
+
+redactConsole(settings.botToken)
 const bot = new Bot(settings.botToken)
 const db = new Db(join(settings.dataDir, 'peeshet.db'))
 const cfg = { ownerId: settings.ownerId, channelId: settings.channelId }
