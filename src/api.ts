@@ -29,6 +29,8 @@ export type ApiDeps = {
 	ownerId: number
 	token: string
 	port: number
+	/** Адрес, на котором слушать; по умолчанию все интерфейсы. */
+	host?: string
 	/** Шаг опроса входящих в long poll, мс. */
 	pollStep?: number
 }
@@ -393,7 +395,7 @@ export function serve(deps: ApiDeps): Server {
 		})
 	})
 
-	server.listen(deps.port)
+	server.listen(deps.port, deps.host)
 
 	return server
 }

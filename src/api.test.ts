@@ -30,6 +30,8 @@ async function setup() {
 		ownerId: OWNER,
 		token: TOKEN,
 		port: 0,
+		// Только loopback: на `::` порт мог совпасть с чужим 127.0.0.1, и запросы уходили туда.
+		host: '127.0.0.1',
 		pollStep: 10,
 	})
 
