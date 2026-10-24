@@ -3,7 +3,15 @@ import { test } from 'node:test'
 
 import { Cards, dateMenu, statusLine } from '#src/cards.ts'
 import { Db } from '#src/db.ts'
-import { apiError, CHANNEL, fakeBot, notModified, OWNER } from '#src/testing.ts'
+import { Invalid } from '#src/post.ts'
+import {
+	apiError,
+	CHANNEL,
+	fakeBot,
+	MARKUP_ERROR,
+	notModified,
+	OWNER,
+} from '#src/testing.ts'
 
 // Чт 2026-10-22 12:00 МСК.
 const NOW = Date.UTC(2026, 9, 22, 9) / 1000
@@ -366,4 +374,108 @@ test('an extra that is already gone is forgotten', async () => {
 
 	await cards.show(post.id)
 	assert.deepEqual(db.extras(post.id), [])
+})
+
+const rejection = (e: unknown) =>
+	e instanceof Invalid &&
+	e.message === `Telegram не принял разметку: ${MARKUP_ERROR}`
+
+test('revise saves the text and edits the card', async () => {
+	const { fake, db, cards, post } = setup()
+
+	await cards.show(post.id)
+	assert.equal(await cards.revise(post.id, (t) => `${t}, дополнен`), true)
+	assert.equal(db.get(post.id).text, 'Текст, дополнен')
+
+	assert.deepEqual(
+		db.revisions(post.id).map((r) => r.text),
+		['Текст'],
+	)
+
+	assert.deepEqual(rich(fake.named('editMessageText')[0]), {
+		markdown: 'Текст, дополнен',
+	})
+})
+
+test('markup telegram rejects is rolled back and the card stays', async () => {
+	const { fake, db, cards, post } = setup()
+
+	await cards.show(post.id)
+	const card = db.card(post.id)
+
+	fake.rejectMarkup('$$')
+
+	await assert.rejects(
+		cards.revise(post.id, () => 'Формула $$'),
+		rejection,
+	)
+
+	assert.equal(db.get(post.id).text, 'Текст')
+	assert.deepEqual(db.revisions(post.id), [])
+	assert.deepEqual(db.card(post.id), card)
+	assert.deepEqual(deleted(fake), [])
+})
+
+test('markup is rejected for a post without a card too', async () => {
+	const { fake, db, cards, post } = setup()
+
+	fake.rejectMarkup('$$')
+
+	await assert.rejects(
+		cards.revise(post.id, () => 'Формула $$'),
+		rejection,
+	)
+
+	assert.equal(db.get(post.id).text, 'Текст')
+	assert.equal(db.card(post.id), null)
+})
+
+test('limits are checked before telegram sees the text', async () => {
+	const { fake, cards, post } = setup()
+
+	await assert.rejects(
+		cards.revise(post.id, () => '![](tg://photo?id=p1)'),
+		/p1/,
+	)
+
+	assert.equal(fake.calls.length, 0)
+})
+
+test('a card that fails for another reason keeps the new text', async () => {
+	const { fake, db, cards, post } = setup()
+	const restore = quiet()
+
+	await cards.show(post.id)
+	fake.fail('editMessageText', apiError('editMessageText', 500, 'boom'))
+	const shown = await cards.revise(post.id, () => 'Новый')
+
+	restore()
+	assert.equal(shown, false)
+	assert.equal(db.get(post.id).text, 'Новый')
+})
+
+test('create shows the card of the new post', async () => {
+	const { fake, db, cards } = setup()
+	const { post, card } = await cards.create({ rubric: 'релиз', text: 'Вышло' })
+
+	assert.equal(card, true)
+	assert.equal(db.get(post.id).text, 'Вышло')
+	assert.ok(db.card(post.id))
+	assert.equal(fake.named('sendRichMessage').length, 1)
+})
+
+test('a new post with rejected markup does not stay in the queue', async () => {
+	const { fake, db, cards, post } = setup()
+
+	fake.rejectMarkup('$$')
+
+	await assert.rejects(
+		cards.create({ rubric: 'релиз', text: 'Формула $$' }),
+		rejection,
+	)
+
+	assert.deepEqual(
+		db.list().map((p) => p.id),
+		[post.id],
+	)
 })

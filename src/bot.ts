@@ -236,12 +236,15 @@ export function handlers({
 
 		if (!best) return
 
+		const caption = ctx.msg.caption
+		let shown: boolean
+
 		try {
 			const { key } = db.addMedia(post.id, best.file_id)
 
-			db.setText(
+			shown = await cards.revise(
 				post.id,
-				`${db.get(post.id).text.trimEnd()}\n\n${photoParagraph(key, ctx.msg.caption)}`,
+				(text) => `${text.trimEnd()}\n\n${photoParagraph(key, caption)}`,
 			)
 		} catch (e) {
 			if (!(e instanceof Invalid)) throw e
@@ -249,15 +252,10 @@ export function handlers({
 			return void (await ctx.reply(e.message))
 		}
 
-		try {
-			await cards.show(post.id)
-		} catch (e) {
-			console.error('card refresh failed', e)
-
+		if (!shown)
 			return void (await ctx.reply(
 				'Фото прикрепил, а карточку обновить не вышло.',
 			))
-		}
 
 		// Фото уже в карточке, копия от владельца в чате лишняя.
 		await ctx.deleteMessage().catch(() => {})

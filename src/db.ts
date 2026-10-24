@@ -286,6 +286,24 @@ export class Db {
 		})
 	}
 
+	/**
+	 * Отменяет правку, которую не принял Telegram: возвращает текст ревизии `revisionId` и
+	 * забирает её. Статус не проверяет: пост могли запланировать, пока карточка рисовалась.
+	 */
+	undoText(id: number, revisionId: number): Post {
+		return this.#tx(() => {
+			const row = this.#db
+				.prepare('SELECT text FROM revisions WHERE id = ? AND post_id = ?')
+				.get(revisionId, id) as Row | undefined
+
+			if (!row) throw new NotFound(`Ревизии ${revisionId} нет.`)
+
+			this.#db.prepare('DELETE FROM revisions WHERE id = ?').run(revisionId)
+
+			return this.#update(id, { text: String(row.text) })
+		})
+	}
+
 	schedule(id: number, at: number): Post {
 		if (at < this.#now()) throw new Invalid('Это время уже прошло.')
 

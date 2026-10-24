@@ -6,7 +6,13 @@ import { test } from 'node:test'
 import { serve } from '#src/api.ts'
 import { Cards } from '#src/cards.ts'
 import { Db } from '#src/db.ts'
-import { apiError, CHANNEL, fakeBot, OWNER } from '#src/testing.ts'
+import {
+	apiError,
+	CHANNEL,
+	fakeBot,
+	MARKUP_ERROR,
+	OWNER,
+} from '#src/testing.ts'
 
 const NOW = 1_790_000_000
 const TOKEN = 't'.repeat(32)
@@ -398,4 +404,69 @@ test('a doomed upload never reaches the owner chat', async (t) => {
 	assert.equal(res.status, 400)
 	assert.match(res.json.error, /50/)
 	assert.equal(fake.named('sendPhoto').length, 0)
+})
+
+test('markup telegram rejects is a 400 with its reason and saves nothing', async (t) => {
+	const { fake, db, server, call } = await setup()
+
+	t.after(() => server.close())
+	const { json } = await call('POST', '/api/posts', {
+		rubric: 'мысль',
+		text: 'v1',
+	})
+
+	fake.rejectMarkup('$$')
+	const res = await call('PATCH', `/api/posts/${json.id}`, {
+		text: 'Формула $$',
+		voice: 90,
+	})
+
+	assert.equal(res.status, 400)
+	assert.equal(res.json.error, `Telegram не принял разметку: ${MARKUP_ERROR}`)
+	assert.equal(db.get(json.id).text, 'v1')
+	assert.equal(db.get(json.id).voice, null)
+	assert.equal(db.revisions(json.id).length, 0)
+})
+
+test('a new post with rejected markup is a 400 and leaves nothing', async (t) => {
+	const { fake, db, server, call } = await setup()
+
+	t.after(() => server.close())
+	fake.rejectMarkup('$$')
+
+	const res = await call('POST', '/api/posts', {
+		rubric: 'мысль',
+		text: 'Формула $$',
+	})
+
+	assert.equal(res.status, 400)
+	assert.equal(res.json.error, `Telegram не принял разметку: ${MARKUP_ERROR}`)
+	assert.deepEqual(db.list(), [])
+})
+
+test('patch saves text and meta together and links only known photos', async (t) => {
+	const { db, server, call } = await setup()
+
+	t.after(() => server.close())
+	const { json } = await call('POST', '/api/posts', {
+		rubric: 'мысль',
+		text: 'v1',
+	})
+	const unknown = await call('PATCH', `/api/posts/${json.id}`, {
+		text: 'v2\n\n![](tg://photo?id=p7)',
+	})
+
+	assert.equal(unknown.status, 400)
+	assert.match(unknown.json.error, /p7/)
+	db.addMedia(json.id, 'f1')
+
+	const ok = await call('PATCH', `/api/posts/${json.id}`, {
+		text: 'v2\n\n![](tg://photo?id=p1)',
+		voice: 91,
+	})
+
+	assert.equal(ok.status, 200)
+	assert.equal(ok.json.card, true)
+	assert.equal(ok.json.text, 'v2\n\n![](tg://photo?id=p1)')
+	assert.equal(ok.json.voice, 91)
 })

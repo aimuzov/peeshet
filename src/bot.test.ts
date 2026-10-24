@@ -584,3 +584,16 @@ test('a photo is kept even when the card refresh fails', async () => {
 		'Фото прикрепил, а карточку обновить не вышло.',
 	)
 })
+
+test('a photo whose paragraph telegram rejects is rolled back', async () => {
+	const { fake, db, post } = setup()
+
+	db.setCard(post.id, 600)
+	fake.rejectMarkup('tg://photo')
+	await fake.feed(photo('big', { replyTo: 600 }))
+	assert.equal(db.get(post.id).text, 'Пост')
+	assert.deepEqual(db.revisions(post.id), [])
+	assert.match(String(fake.named('sendMessage').at(-1)?.text), /не принял/)
+	// Фото владельца остаётся: в пост оно не попало.
+	assert.equal(fake.named('deleteMessage').length, 0)
+})

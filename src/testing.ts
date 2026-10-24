@@ -35,6 +35,9 @@ export const apiError = (
 		{},
 	)
 
+/** Так Telegram отвечает на rich-сообщение с негодной разметкой. */
+export const MARKUP_ERROR = "Bad Request: can't parse rich message"
+
 /** Telegram не ответил вовсе. */
 export const networkError = (method: string, code = 'ECONNREFUSED') =>
 	new HttpError(
@@ -59,13 +62,15 @@ const EDITS = new Set(['editMessageText', 'editMessageReplyMarkup'])
  * Ответ из `answer` может быть промисом: так тест придерживает вызов. Метод без своего
  * ответа отвечает сообщением с новым `message_id`, rich-сообщение — с `rich_message`, правки
  * `editMessage*` — тем же сообщением. `fail` роняет следующие вызовы метода заданными
- * ошибками по очереди.
+ * ошибками по очереди, `rejectMarkup` — rich-сообщения с заданным куском текста, как
+ * Telegram отвечает на негодную разметку.
  */
 export function fakeBot() {
 	const bot = new Bot('1:token', { botInfo: ME })
 	const calls: Call[] = []
 	const answers = new Map<string, Answer>()
 	const failures = new Map<string, Error[]>()
+	const badMarkup: string[] = []
 	let messageId = 1000
 
 	const message = (p: Record<string, unknown>) => ({
@@ -88,6 +93,11 @@ export function fakeBot() {
 		const queue = failures.get(method)
 
 		if (queue?.length) throw queue.shift()
+
+		const rich = p.rich_message as { markdown?: string } | undefined
+
+		if (badMarkup.some((bad) => rich?.markdown?.includes(bad)))
+			throw apiError(method, 400, MARKUP_ERROR)
 
 		const answer = answers.get(method)
 		let result: unknown
@@ -128,6 +138,7 @@ export function fakeBot() {
 		answer: (method: string, fn: Answer) => answers.set(method, fn),
 		fail: (method: string, ...errors: Error[]) =>
 			failures.set(method, [...(failures.get(method) ?? []), ...errors]),
+		rejectMarkup: (bad: string) => void badMarkup.push(bad),
 		feed: (update: object) =>
 			bot.handleUpdate({ update_id: ++messageId, ...update } as Update),
 	}

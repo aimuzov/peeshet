@@ -244,7 +244,7 @@ export function serve(deps: ApiDeps): Server {
 
 			if (!isString(body.text)) throw new Invalid('Нужен text.')
 
-			const post = db.create({
+			const { post, card } = await cards.create({
 				rubric: body.rubric,
 				text: body.text,
 				voice: optional(body.voice, isNumber, 'voice'),
@@ -253,15 +253,13 @@ export function serve(deps: ApiDeps): Server {
 				imagePrompt: optional(body.imagePrompt, isString, 'imagePrompt'),
 			})
 
-			return reply(res, 201, {
-				...full(post),
-				card: await refresh(post.id),
-			})
+			return reply(res, 201, { ...full(post), card })
 		}
 
 		if (method === 'GET' && !action) return reply(res, 200, full(db.get(id)))
 
 		let extra = {}
+		let card: boolean | undefined
 
 		if (method === 'PATCH' && !action) {
 			const body = await readJson(req)
@@ -279,9 +277,19 @@ export function serve(deps: ApiDeps): Server {
 				imagePrompt: optional(body.imagePrompt, isString, 'imagePrompt'),
 			}
 
-			if (body.text !== undefined) db.setText(id, body.text)
+			const text = body.text as string | undefined
 
-			db.setMeta(id, meta)
+			// Текст первым: его проверяет Telegram, и при отказе мета не должна остаться записанной.
+			if (text !== undefined) card = await cards.revise(id, () => text)
+
+			// Мета меняет строку статуса, поэтому карточку тогда рисуем ещё раз.
+			if (
+				text === undefined ||
+				Object.values(meta).some((v) => v !== undefined)
+			) {
+				db.setMeta(id, meta)
+				card = undefined
+			}
 		} else if (method === 'POST' && action === 'revert') {
 			db.revert(id)
 		} else if (method === 'POST' && action === 'schedule') {
@@ -294,7 +302,7 @@ export function serve(deps: ApiDeps): Server {
 			throw notFound()
 		}
 
-		const card = await refresh(id)
+		card ??= await refresh(id)
 
 		return reply(res, 200, { ...full(db.get(id)), ...extra, card })
 	}

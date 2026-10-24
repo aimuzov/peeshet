@@ -382,3 +382,21 @@ test('push rejects an unknown post', () => {
 
 	assert.throws(() => db.push('reply', 999, 'текст'), NotFound)
 })
+
+test('undoText takes back an edit telegram did not accept', () => {
+	const { db } = open()
+	const post = draft(db, 'v1')
+
+	db.setText(post.id, 'v2')
+	db.setText(post.id, 'v3')
+	const [last] = db.revisions(post.id)
+
+	assert.equal(db.undoText(post.id, last.id).text, 'v2')
+
+	assert.deepEqual(
+		db.revisions(post.id).map((r) => r.text),
+		['v1'],
+	)
+
+	assert.throws(() => db.undoText(post.id, last.id), NotFound)
+})

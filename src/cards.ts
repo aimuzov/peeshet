@@ -5,8 +5,8 @@
 import { GrammyError, InlineKeyboard, type Api } from 'grammy'
 import type { InlineKeyboardButton, InputRichMessage } from 'grammy/types'
 
-import { STATUS_RU, type Db, type ExtraKind } from '#src/db.ts'
-import type { Post } from '#src/post.ts'
+import { STATUS_RU, type Db, type ExtraKind, type NewPost } from '#src/db.ts'
+import { Invalid, type Post } from '#src/post.ts'
 import { richMessage, send } from '#src/send.ts'
 import { formatMsk, todayAt } from '#src/time.ts'
 
@@ -120,6 +120,13 @@ const is400 = (e: unknown, text = ''): e is GrammyError =>
 export const notModified = (e: unknown) => is400(e, 'message is not modified')
 
 /**
+ * Telegram не принял содержимое поста. Правка карточки на любой 400 откатывается к отправке
+ * новой, поэтому 400 на саму отправку — это уже разметка, а не старое или удалённое сообщение.
+ */
+const rejected = (e: unknown): e is GrammyError =>
+	is400(e) && e.method === 'sendRichMessage'
+
+/**
  * Карточка поста в личке владельца — одно rich-сообщение, которое правится на месте, сверху
  * клавиатуры строка статуса.
  */
@@ -127,7 +134,7 @@ export class Cards {
 	readonly #api: Api
 	readonly #db: Db
 	readonly #cfg: CardsConfig
-	readonly #queue = new Map<number, Promise<void>>()
+	readonly #queue = new Map<number, Promise<unknown>>()
 
 	constructor(api: Api, db: Db, cfg: CardsConfig) {
 		this.#api = api
@@ -138,6 +145,31 @@ export class Cards {
 	/** Перерисовывает карточку на месте; новую присылает, только если старую не поправить. */
 	show(id: number): Promise<void> {
 		return this.#serial(id, () => this.#show(id))
+	}
+
+	/**
+	 * Меняет текст поста и показывает его в карточке. Разметку проверяет Telegram: если он
+	 * не принял новый текст, правка откатывается, а наружу уходит {@link Invalid} с его
+	 * причиной. `change` получает текст уже в очереди поста, поэтому дописывания по очереди
+	 * не теряют друг друга. `false` — текст сохранён, а карточку обновить не вышло.
+	 */
+	revise(id: number, change: (text: string) => string): Promise<boolean> {
+		return this.#serial(id, async () => {
+			this.#db.setText(id, change(this.#db.get(id).text))
+			const [revision] = this.#db.revisions(id)
+
+			return this.#validated(id, () => this.#db.undoText(id, revision.id))
+		})
+	}
+
+	/** Заводит пост и показывает его карточку; пост с негодной разметкой сразу удаляется. */
+	async create(p: NewPost): Promise<{ post: Post; card: boolean }> {
+		const post = this.#db.create(p)
+		const card = await this.#serial(post.id, () =>
+			this.#validated(post.id, () => this.#db.remove(post.id)),
+		)
+
+		return { post, card }
 	}
 
 	/**
@@ -180,7 +212,7 @@ export class Cards {
 	 * Показы одного поста идут по очереди: параллельные апдейты иначе пришлют несколько
 	 * карточек, а в базе останется одна. Пост читается уже в своей очереди, а не при вызове.
 	 */
-	#serial(id: number, step: () => Promise<void>): Promise<void> {
+	#serial<T>(id: number, step: () => Promise<T>): Promise<T> {
 		const run = (this.#queue.get(id) ?? Promise.resolve()).then(step, step)
 		const tail = run.catch(() => {})
 
@@ -191,6 +223,25 @@ export class Cards {
 		})
 
 		return run
+	}
+
+	/** Показывает карточку после записи; если Telegram не принял разметку, `undo` её отменяет. */
+	async #validated(id: number, undo: () => void): Promise<boolean> {
+		try {
+			await this.#show(id)
+
+			return true
+		} catch (e) {
+			if (!rejected(e)) {
+				console.error('card refresh failed', e)
+
+				return false
+			}
+
+			undo()
+
+			throw new Invalid(`Telegram не принял разметку: ${e.description}`)
+		}
 	}
 
 	async #show(id: number): Promise<void> {
