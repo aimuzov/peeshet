@@ -59,6 +59,9 @@ export const photoKeys = (text: string): string[] => [
 export const isRubric = (value: unknown): value is Rubric =>
 	RUBRICS.includes(value as Rubric)
 
+export const tooManyPhotos = () =>
+	new Invalid(`В посте не больше ${MEDIA_LIMIT} фото.`)
+
 /**
  * Бросает {@link Invalid}, если пост с таким текстом и фото с ключами `keys` Telegram заведомо
  * не примет. Разметку проверяет он сам, когда пост приходит в карточку.
@@ -66,15 +69,17 @@ export const isRubric = (value: unknown): value is Rubric =>
 export function checkLimits(text: string, keys: string[]): void {
 	if (!text.trim()) throw new Invalid('Пустой текст.')
 
-	if (keys.length > MEDIA_LIMIT)
-		throw new Invalid(`В посте не больше ${MEDIA_LIMIT} фото.`)
+	// В сообщение идут только фото из текста, поэтому и лимит считаем по ним.
+	const used = photoKeys(text)
+
+	if (used.length > MEDIA_LIMIT) throw tooManyPhotos()
 
 	const length = [...text].length
 
 	if (length > RICH_LIMIT)
 		throw new Invalid(`Текст длиннее ${RICH_LIMIT} символов: ${length}.`)
 
-	const unknown = photoKeys(text).filter((key) => !keys.includes(key))
+	const unknown = used.filter((key) => !keys.includes(key))
 
 	if (unknown.length)
 		throw new Invalid(

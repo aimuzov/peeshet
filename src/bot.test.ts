@@ -594,6 +594,8 @@ test('a photo whose paragraph telegram rejects is rolled back', async () => {
 	assert.equal(db.get(post.id).text, 'Пост')
 	assert.deepEqual(db.revisions(post.id), [])
 	assert.match(String(fake.named('sendMessage').at(-1)?.text), /не принял/)
+	// В текст фото не попало, держать его незачем.
+	assert.deepEqual(db.media(post.id), [])
 	// Фото владельца остаётся: в пост оно не попало.
 	assert.equal(fake.named('deleteMessage').length, 0)
 })

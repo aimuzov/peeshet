@@ -240,16 +240,26 @@ export function handlers({
 		if (!best) return
 
 		const caption = ctx.msg.caption
+		let key: string
 		let shown: Shown
 
 		try {
-			const { key } = db.addMedia(post.id, best.file_id)
+			key = db.addMedia(post.id, best.file_id).key
+		} catch (e) {
+			if (!(e instanceof Invalid)) throw e
 
+			return void (await ctx.reply(e.message))
+		}
+
+		try {
 			shown = await cards.revise(
 				post.id,
 				(text) => `${text.trimEnd()}\n\n${photoParagraph(key, caption)}`,
 			)
 		} catch (e) {
+			// В текст фото не попало: Telegram его не принял или пост уже не править.
+			db.dropMedia(post.id, key)
+
 			if (!(e instanceof Invalid)) throw e
 
 			return void (await ctx.reply(e.message))

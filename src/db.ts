@@ -5,7 +5,10 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import {
 	checkLimits,
 	Invalid,
+	MEDIA_LIMIT,
 	NotFound,
+	photoKeys,
+	tooManyPhotos,
 	type InboxItem,
 	type InboxKind,
 	type Post,
@@ -448,11 +451,11 @@ export class Db {
 		const post = this.editable(id)
 		const keys = this.#keys(id)
 		const last = Math.max(0, ...keys.map((k) => Number(k.slice(1)) || 0))
-		const key = `p${last + 1}`
 
-		checkLimits(post.text, [...keys, key])
+		// Новое фото встанет в текст, поэтому место под него ищем среди уже вставленных.
+		if (photoKeys(post.text).length >= MEDIA_LIMIT) throw tooManyPhotos()
 
-		return key
+		return `p${last + 1}`
 	}
 
 	addMedia(id: number, fileId: string): { post: Post; key: string } {
@@ -465,6 +468,15 @@ export class Db {
 
 			return { post: this.#update(id, {}), key }
 		})
+	}
+
+	/** Забывает фото, которое так и не попало в текст; вставленное не трогает. */
+	dropMedia(id: number, key: string): void {
+		if (photoKeys(this.get(id).text).includes(key)) return
+
+		this.#db
+			.prepare('DELETE FROM media WHERE post_id = ? AND key = ?')
+			.run(id, key)
 	}
 
 	media(id: number): Media[] {

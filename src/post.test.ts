@@ -10,11 +10,17 @@ test('text fits 32768 characters', () => {
 	checkLimits('😀'.repeat(32768), [])
 })
 
-test('a post holds up to 50 photos', () => {
+test('a post shows up to 50 photos', () => {
 	const keys = (n: number) => Array.from({ length: n }, (_, i) => `p${i + 1}`)
+	const text = (n: number) =>
+		keys(n)
+			.map((k) => `![](tg://photo?id=${k})`)
+			.join('\n\n')
 
-	checkLimits('a', keys(50))
-	assert.throws(() => checkLimits('a', keys(51)), /50/)
+	checkLimits(text(50), keys(60))
+	assert.throws(() => checkLimits(text(51), keys(51)), /50/)
+	// Фото, которых нет в тексте, в сообщение не идут и лимит не тратят.
+	checkLimits('a', keys(60))
 })
 
 test('photo links must point at photos of the post', () => {

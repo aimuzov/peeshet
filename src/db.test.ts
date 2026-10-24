@@ -17,6 +17,10 @@ function open() {
 	return { db, clock }
 }
 
+/** Абзацы со всеми фото поста. */
+const all = (db: Db, id: number) =>
+	db.media(id).map((m) => `![](tg://photo?id=${m.key})`)
+
 const quiet = () => {
 	const log = console.error
 
@@ -177,8 +181,23 @@ test('text refers only to photos of its post, up to 50 of them', () => {
 
 	for (let i = 2; i <= 50; i++) db.addMedia(post.id, `f${i}`)
 
-	assert.throws(() => db.addMedia(post.id, 'f51'), /50/)
-	assert.equal(db.media(post.id).length, 50)
+	// В тексте одно фото из 50: ещё одно поместится.
+	assert.equal(db.addMedia(post.id, 'f51').key, 'p51')
+	db.setText(post.id, all(db, post.id).slice(0, 50).join('\n\n'))
+	assert.throws(() => db.addMedia(post.id, 'f52'), /50/)
+	assert.equal(db.media(post.id).length, 51)
+})
+
+test('dropMedia forgets only a photo the text does not use', () => {
+	const { db } = open()
+	const post = draft(db)
+
+	db.addMedia(post.id, 'f1')
+	db.addMedia(post.id, 'f2')
+	db.setText(post.id, '![](tg://photo?id=p1)')
+	db.dropMedia(post.id, 'p1')
+	db.dropMedia(post.id, 'p2')
+	assert.deepEqual(db.media(post.id), [{ key: 'p1', fileId: 'f1' }])
 })
 
 test('photos get keys p1, p2… in their post', () => {

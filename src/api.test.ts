@@ -396,6 +396,14 @@ test('a doomed upload never reaches the owner chat', async (t) => {
 
 	for (let i = 1; i <= 50; i++) db.addMedia(json.id, `f${i}`)
 
+	db.setText(
+		json.id,
+		db
+			.media(json.id)
+			.map((m) => `![](tg://photo?id=${m.key})`)
+			.join('\n\n'),
+	)
+
 	const res = await call(
 		'POST',
 		`/api/posts/${json.id}/media`,
