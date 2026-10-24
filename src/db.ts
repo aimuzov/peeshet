@@ -162,17 +162,28 @@ export class Db {
 				)
 				.run()
 
-		// Фото без ключей из базы разработки в текст не вставить, их проще забыть.
-		if (!this.#columns('media').includes('key')) {
-			this.#db.prepare('DROP TABLE media').run()
-			this.#db.prepare(MEDIA).run()
+		// Фото без ключей в текст не вставить, а карточки с видом (текст или фото) rich-карточка
+		// заменит сама. Пересоздаём, только если терять уже нечего.
+		const stale = [
+			!this.#columns('media').includes('key') && { table: 'media', sql: MEDIA },
+			this.#columns('cards').includes('kind') && { table: 'cards', sql: CARDS },
+		].filter((t) => t !== false)
+
+		if (stale.length && this.#unpublished()) {
+			this.#db.close()
+
+			throw new Error(
+				'Старая схема базы: есть неопубликованные посты, перенеси или удали data/peeshet.db вручную',
+			)
 		}
 
-		// Карточки с видом (текст или фото) из прошлой схемы: rich-карточка пришлётся заново.
-		if (this.#columns('cards').includes('kind')) {
-			this.#db.prepare('DROP TABLE cards').run()
-			this.#db.prepare(CARDS).run()
+		for (const { table, sql } of stale) {
+			this.#db.prepare(`DROP TABLE ${table}`).run()
+			this.#db.prepare(sql).run()
 		}
+
+		// Превью альбома больше нет, его сообщения ни к чему.
+		this.#db.prepare(`DELETE FROM extras WHERE kind = 'album'`).run()
 
 		// Фото раньше писались во входящие событием; теперь их разбирает сервер, сессии они не нужны.
 		this.#db
@@ -625,6 +636,16 @@ export class Db {
 
 	#keys(id: number): string[] {
 		return this.media(id).map((m) => m.key)
+	}
+
+	#unpublished(): boolean {
+		const row = this.#db
+			.prepare(
+				`SELECT count(*) AS n FROM posts WHERE status IN ('draft', 'scheduled', 'failed', 'publishing')`,
+			)
+			.get() as Row
+
+		return Number(row.n) > 0
 	}
 
 	#columns(table: string): string[] {

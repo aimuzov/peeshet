@@ -217,50 +217,57 @@ test('photos get keys p1, p2… in their post', () => {
 	])
 })
 
-test('a media table without keys is recreated on open', () => {
+/** База в старой схеме: media без ключей, cards с видом карточки, превью альбома в extras. */
+function legacy(status: string) {
 	const dir = mkdtempSync(join(tmpdir(), 'peeshet-'))
 	const path = join(dir, 'p.db')
 	const raw = new DatabaseSync(path)
 
 	for (const sql of [
 		`CREATE TABLE posts (id INTEGER PRIMARY KEY, rubric TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, publish_at INTEGER, channel_msg_id INTEGER, voice INTEGER, projects TEXT NOT NULL DEFAULT '[]', sources TEXT NOT NULL DEFAULT '[]', image_prompt TEXT, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
-		`INSERT INTO posts (rubric, text, status, created_at, updated_at) VALUES ('мысль', 'x', 'draft', 1, 1)`,
+		`INSERT INTO posts (rubric, text, status, created_at, updated_at) VALUES ('мысль', 'x', '${status}', 1, 1)`,
 		'CREATE TABLE media (id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL REFERENCES posts(id), file_id TEXT NOT NULL)',
 		`INSERT INTO media (post_id, file_id) VALUES (1, 'old')`,
+		'CREATE TABLE cards (post_id INTEGER PRIMARY KEY REFERENCES posts(id), msg_id INTEGER NOT NULL UNIQUE, kind TEXT NOT NULL)',
+		`INSERT INTO cards (post_id, msg_id, kind) VALUES (1, 10, 'photo')`,
+		'CREATE TABLE extras (msg_id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL REFERENCES posts(id), kind TEXT NOT NULL)',
+		`INSERT INTO extras (msg_id, post_id, kind) VALUES (11, 1, 'album'), (12, 1, 'error')`,
 	])
 		raw.prepare(sql).run()
 
 	raw.close()
 
+	return { path, done: () => rmSync(dir, { recursive: true }) }
+}
+
+test('old media and cards tables are recreated when every post is out', () => {
+	const { path, done } = legacy('published')
 	const db = new Db(path, () => NOW)
 
 	assert.deepEqual(db.media(1), [])
-	assert.equal(db.addMedia(1, 'new').key, 'p1')
-	rmSync(dir, { recursive: true })
-})
-
-test('a cards table with the old kind column is recreated on open', () => {
-	const dir = mkdtempSync(join(tmpdir(), 'peeshet-'))
-	const path = join(dir, 'p.db')
-
-	new Db(path, () => NOW).create({ rubric: 'мысль', text: 'x' })
-	const raw = new DatabaseSync(path)
-
-	for (const sql of [
-		'DROP TABLE cards',
-		'CREATE TABLE cards (post_id INTEGER PRIMARY KEY REFERENCES posts(id), msg_id INTEGER NOT NULL UNIQUE, kind TEXT NOT NULL)',
-		`INSERT INTO cards (post_id, msg_id, kind) VALUES (1, 10, 'photo')`,
-	])
-		raw.prepare(sql).run()
-
-	raw.close()
-
-	const db = new Db(path, () => NOW)
-
 	assert.equal(db.card(1), null)
 	assert.equal(db.setCard(1, 20), null)
 	assert.deepEqual(db.card(1), { msgId: 20 })
-	rmSync(dir, { recursive: true })
+	// Превью альбома больше нет, а уведомление о сбое остаётся.
+	assert.deepEqual(db.extras(1), [12])
+	const fresh = db.create({ rubric: 'мысль', text: 'y' })
+
+	assert.equal(db.addMedia(fresh.id, 'new').key, 'p1')
+	done()
+})
+
+test('old tables with unpublished posts are left for the owner to sort out', () => {
+	for (const status of ['draft', 'scheduled', 'failed', 'publishing']) {
+		const { path, done } = legacy(status)
+
+		assert.throws(() => new Db(path, () => NOW), /Старая схема базы/, status)
+		// Ничего не потеряно: фото на месте.
+		const raw = new DatabaseSync(path)
+
+		assert.equal(raw.prepare('SELECT count(*) AS n FROM media').get()?.n, 1)
+		raw.close()
+		done()
+	}
 })
 
 test('card and extra messages map back to their post', () => {
