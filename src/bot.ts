@@ -28,6 +28,16 @@ const FORWARDED = 'Передал в сессию.'
 
 type Markup = Parameters<Context['editMessageReplyMarkup']>[0]
 
+/** Абзац с фото в Markdown поста; подпись к фото становится подписью картинки. */
+export function photoParagraph(key: string, caption?: string): string {
+	const title = caption
+		?.trim()
+		.replace(/\s*\n\s*/g, ' ')
+		.replace(/[\\"]/g, '\\$&')
+
+	return `![](tg://photo?id=${key}${title ? ` "${title}"` : ''})`
+}
+
 /** Повторное нажатие даёт тот же набор кнопок, и Telegram отвечает 400: это не ошибка. */
 async function swapMarkup(
 	ctx: Context,
@@ -91,9 +101,7 @@ export function handlers({
 
 		if (!posts.length) return void (await ctx.reply('Очередь пуста.'))
 
-		const lines = posts.map(
-			(p) => `${p.id}. ${statusLine(p, db.media(p.id).length)}`,
-		)
+		const lines = posts.map((p) => `${p.id}. ${statusLine(p)}`)
 		const kb = posts.map((p) => [
 			{ text: `Открыть ${p.id}`, callback_data: `o:${p.id}` },
 		])
@@ -113,9 +121,6 @@ export function handlers({
 			// Строка статуса: кнопка ради текста, нажимать её незачем.
 			case 'n':
 				return
-
-			case 'a':
-				return cards.album(id)
 
 			case 'o':
 				return cards.show(id)
@@ -219,6 +224,7 @@ export function handlers({
 		}
 	})
 
+	// Альбом приходит отдельными апдейтами: ключи раздаются по порядку прихода, синхронно.
 	bot.on('message:photo', async (ctx) => {
 		const replyTo = ctx.msg.reply_to_message?.message_id
 		const post = replyTo ? db.byPreview(replyTo) : null
@@ -231,16 +237,17 @@ export function handlers({
 		if (!best) return
 
 		try {
-			db.addMedia(post.id, best.file_id)
+			const { key } = db.addMedia(post.id, best.file_id)
+
+			db.setText(
+				post.id,
+				`${db.get(post.id).text.trimEnd()}\n\n${photoParagraph(key, ctx.msg.caption)}`,
+			)
 		} catch (e) {
 			if (!(e instanceof Invalid)) throw e
 
 			return void (await ctx.reply(e.message))
 		}
-
-		// Фото сервер разобрал сам, а подпись могла быть просьбой к сессии. Само фото
-		// удалим, поэтому srcMsgId у входящего нет.
-		if (ctx.msg.caption) db.push('reply', post.id, ctx.msg.caption)
 
 		try {
 			await cards.show(post.id)

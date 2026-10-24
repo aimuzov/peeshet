@@ -14,6 +14,13 @@ import {
 
 const NOW = 1_790_000_000
 
+const reply = (p: Record<string, unknown>) => ({
+	message_id: 2000,
+	date: 0,
+	chat: { id: p.chat_id, type: 'private' },
+	rich_message: p.rich_message,
+})
+
 function setup() {
 	const fake = fakeBot()
 	const clock = { t: NOW }
@@ -27,7 +34,11 @@ function setup() {
 }
 
 const toChannel = (fake: ReturnType<typeof fakeBot>) =>
-	fake.named('sendMessage').filter((p) => p.chat_id === CHANNEL)
+	fake.named('sendRichMessage').filter((p) => p.chat_id === CHANNEL)
+const cardsSent = (fake: ReturnType<typeof fakeBot>) =>
+	fake.named('sendRichMessage').filter((p) => p.chat_id === OWNER)
+const markdown = (p: Record<string, unknown>) =>
+	(p.rich_message as { markdown: string }).markdown
 const toOwner = (fake: ReturnType<typeof fakeBot>) =>
 	fake
 		.named('sendMessage')
@@ -46,13 +57,37 @@ test('publishes when the time comes', async () => {
 	assert.equal(db.get(post.id).status, 'published')
 	// Вместо «Вышло» карточка сама становится опубликованной.
 	assert.ok(!toOwner(fake).some((t) => t.startsWith('Вышло')))
-	const [card] = fake.named('sendMessage').filter((p) => p.chat_id === OWNER)
+	const [card] = cardsSent(fake)
 	const kb = JSON.stringify(card.reply_markup)
 
 	assert.match(kb, /опубликован/)
 	assert.match(kb, /https:\/\/t.me\/aimuzov_peeshet\//)
 	assert.equal(db.card(post.id)?.msgId !== undefined, true)
 	assert.equal(fake.named('deleteMessages').length, 0)
+})
+
+test('the channel gets the same rich message as the card, without buttons', async () => {
+	const { fake, db, scheduler, post, cards } = setup()
+	const text = 'Пост\n\n![](tg://photo?id=p2 "второе")'
+
+	db.addMedia(post.id, 'f1')
+	db.addMedia(post.id, 'f2')
+	db.setText(post.id, text)
+	await cards.show(post.id)
+	db.schedule(post.id, NOW)
+	await scheduler.tick()
+	const [sent] = toChannel(fake)
+
+	assert.deepEqual(sent.rich_message, {
+		markdown: text,
+		media: [{ id: 'p2', media: { type: 'photo', media: 'f2' } }],
+	})
+
+	assert.deepEqual(sent.rich_message, cardsSent(fake)[0].rich_message)
+	assert.equal(sent.reply_markup, undefined)
+	assert.equal(fake.named('sendMessage').length, 0)
+	assert.equal(fake.named('sendPhoto').length, 0)
+	assert.equal(fake.named('sendMediaGroup').length, 0)
 })
 
 test('publishing edits the existing card in place', async () => {
@@ -63,7 +98,8 @@ test('publishing edits the existing card in place', async () => {
 	const msgId = db.card(post.id)?.msgId
 
 	await scheduler.tick()
-	assert.equal(toOwner(fake).length, 1) // только сама карточка
+	assert.equal(cardsSent(fake).length, 1) // только сама карточка
+	assert.equal(toOwner(fake).length, 0)
 	const [edit] = fake.named('editMessageText')
 
 	assert.equal(edit.message_id, msgId)
@@ -94,9 +130,9 @@ test('sends exactly once through retries', async () => {
 	db.schedule(post.id, NOW)
 
 	fake.fail(
-		'sendMessage',
-		networkError('sendMessage'),
-		apiError('sendMessage', 429, 'Too Many Requests', { retry_after: 1 }),
+		'sendRichMessage',
+		networkError('sendRichMessage'),
+		apiError('sendRichMessage', 429, 'Too Many Requests', { retry_after: 1 }),
 	)
 
 	await scheduler.tick()
@@ -112,9 +148,9 @@ test('failure is reported with the reason', async () => {
 	db.schedule(post.id, NOW)
 
 	fake.fail(
-		'sendMessage',
+		'sendRichMessage',
 		apiError(
-			'sendMessage',
+			'sendRichMessage',
 			403,
 			'Forbidden: bot is not a member of the channel chat',
 		),
@@ -122,17 +158,17 @@ test('failure is reported with the reason', async () => {
 
 	await scheduler.tick()
 	assert.equal(db.get(post.id).status, 'failed')
-	const owner = fake.named('sendMessage').filter((p) => p.chat_id === OWNER)
+	const [notice] = fake.named('sendMessage').filter((p) => p.chat_id === OWNER)
 
-	assert.match(JSON.stringify(owner[0].reply_markup), /не вышел/)
+	assert.match(JSON.stringify(cardsSent(fake)[0].reply_markup), /не вышел/)
 
 	assert.equal(
-		owner[1].text,
+		notice.text,
 		'Не вышел: Forbidden: bot is not a member of the channel chat',
 	)
 
 	assert.equal(
-		(owner[1].reply_parameters as { message_id: number }).message_id,
+		(notice.reply_parameters as { message_id: number }).message_id,
 		db.card(post.id)?.msgId,
 	)
 })
@@ -181,24 +217,16 @@ test('publishes the fresh text, not the due() snapshot', async () => {
 	db.schedule(post.id, NOW)
 	db.schedule(second.id, NOW)
 
-	fake.answer('sendMessage', (p) => {
-		if (p.chat_id === CHANNEL && p.text === 'Пост')
+	fake.answer('sendRichMessage', (p) => {
+		if (p.chat_id === CHANNEL && markdown(p) === 'Пост')
 			db.setText(second.id, 'Новый текст')
 
-		return {
-			message_id: 2000,
-			date: 0,
-			chat: { id: p.chat_id, type: 'channel' },
-			text: p.text,
-		}
+		return reply(p)
 	})
 
 	await scheduler.tick()
 
-	assert.deepEqual(
-		toChannel(fake).map((p) => p.text),
-		['Пост', 'Новый текст'],
-	)
+	assert.deepEqual(toChannel(fake).map(markdown), ['Пост', 'Новый текст'])
 })
 
 test('a post rescheduled while the tick runs is not sent', async () => {
@@ -208,15 +236,10 @@ test('a post rescheduled while the tick runs is not sent', async () => {
 	db.schedule(post.id, NOW)
 	db.schedule(second.id, NOW)
 
-	fake.answer('sendMessage', (p) => {
+	fake.answer('sendRichMessage', (p) => {
 		if (p.chat_id === CHANNEL) db.schedule(second.id, NOW + 86400)
 
-		return {
-			message_id: 2000,
-			date: 0,
-			chat: { id: p.chat_id, type: 'channel' },
-			text: p.text,
-		}
+		return reply(p)
 	})
 
 	await scheduler.tick()
@@ -232,21 +255,15 @@ const quiet = () => {
 	return () => void (console.error = orig)
 }
 
-const reply = (p: Record<string, unknown>) => ({
-	message_id: 2000,
-	date: 0,
-	chat: { id: p.chat_id, type: 'private' },
-	text: p.text,
-})
-
 test('a failing card after publishing does not undo the publication', async () => {
 	const { fake, db, scheduler, post } = setup()
 	const restore = quiet()
 
 	db.schedule(post.id, NOW)
 
-	fake.answer('sendMessage', (p) => {
-		if (p.chat_id === OWNER) throw apiError('sendMessage', 400, 'Bad Request')
+	fake.answer('sendRichMessage', (p) => {
+		if (p.chat_id === OWNER)
+			throw apiError('sendRichMessage', 500, 'Internal Server Error')
 
 		return reply(p)
 	})
@@ -261,10 +278,11 @@ test('a failing card after a send failure still marks the post failed', async ()
 	const restore = quiet()
 
 	db.schedule(post.id, NOW)
-	fake.fail('sendMessage', apiError('sendMessage', 403, 'Forbidden'))
+	fake.fail('sendRichMessage', apiError('sendRichMessage', 403, 'Forbidden'))
 
-	fake.answer('sendMessage', (p) => {
-		if (p.chat_id === OWNER) throw apiError('sendMessage', 400, 'Bad Request')
+	fake.answer('sendRichMessage', (p) => {
+		if (p.chat_id === OWNER)
+			throw apiError('sendRichMessage', 500, 'Internal Server Error')
 
 		return reply(p)
 	})
@@ -329,7 +347,7 @@ test('recover survives a failing card and offers «Открыть»', async () =
 	db.claim(post.id)
 	db.schedule(late.id, NOW)
 	clock.t = NOW + 3600
-	fake.fail('sendMessage', apiError('sendMessage', 400, 'Bad Request'))
+	fake.fail('sendRichMessage', apiError('sendRichMessage', 500, 'boom'))
 	await scheduler.recover()
 	restore()
 	assert.equal(db.get(post.id).status, 'failed')

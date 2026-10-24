@@ -90,7 +90,9 @@ test('create, edit, revert, schedule', async (t) => {
 	const id = created.json.id
 	const at = new Date((NOW + 60) * 1000).toISOString()
 
-	assert.equal(fake.named('sendMessage')[0].text, 'v1') // карточка пришла
+	assert.deepEqual(fake.named('sendRichMessage')[0].rich_message, {
+		markdown: 'v1',
+	}) // карточка пришла
 
 	assert.equal(
 		(await call('PATCH', `/api/posts/${id}`, { text: 'v2' })).json.text,
@@ -134,10 +136,10 @@ test('validation errors are 400 with a message', async (t) => {
 		(
 			await call('POST', '/api/posts', {
 				rubric: 'мысль',
-				text: 'a'.repeat(5000),
+				text: 'a'.repeat(32769),
 			})
 		).json.error,
-		'Текст длиннее 4096 символов: 5000.',
+		'Текст длиннее 32768 символов: 32769.',
 	)
 
 	assert.equal((await call('POST', '/api/posts', '[1]')).status, 400)
@@ -258,8 +260,8 @@ test('a failing card refresh does not fail the request', async (t) => {
 	const restore = quiet()
 
 	t.after(() => server.close())
-	// Первая карточка (текст) не уйдёт.
-	fake.fail('sendMessage', apiError('sendMessage', 400, 'Bad Request'))
+	// Первая карточка не уйдёт, и дело не в разметке.
+	fake.fail('sendRichMessage', apiError('sendRichMessage', 500, 'boom'))
 
 	const created = await call('POST', '/api/posts', {
 		rubric: 'мысль',
@@ -376,13 +378,16 @@ test('a body over the limit is a 413', async (t) => {
 })
 
 test('a doomed upload never reaches the owner chat', async (t) => {
-	const { fake, server, call } = await setup()
+	const { fake, db, server, call } = await setup()
 
 	t.after(() => server.close())
 	const { json } = await call('POST', '/api/posts', {
 		rubric: 'мысль',
-		text: 'a'.repeat(2000),
+		text: 'x',
 	})
+
+	for (let i = 1; i <= 50; i++) db.addMedia(json.id, `f${i}`)
+
 	const res = await call(
 		'POST',
 		`/api/posts/${json.id}/media`,
@@ -391,5 +396,6 @@ test('a doomed upload never reaches the owner chat', async (t) => {
 	)
 
 	assert.equal(res.status, 400)
+	assert.match(res.json.error, /50/)
 	assert.equal(fake.named('sendPhoto').length, 0)
 })

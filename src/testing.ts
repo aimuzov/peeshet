@@ -51,19 +51,15 @@ const OK_TRUE = new Set([
 ])
 
 // Правка возвращает то же сообщение: id не меняется.
-const EDITS = new Set([
-	'editMessageText',
-	'editMessageMedia',
-	'editMessageReplyMarkup',
-	'editMessageCaption',
-])
+const EDITS = new Set(['editMessageText', 'editMessageReplyMarkup'])
 
 /**
  * Бот с подменённым транспортом: вызовы Bot API не уходят в сеть, а копятся в `calls`.
  *
- * Ответ из `answer` может быть промисом: так тест придерживает вызов. Метод без своего ответа отвечает сообщением с новым `message_id`,
- * `sendMediaGroup` — массивом сообщений по числу фото, правки `editMessage*` — тем же
- * сообщением. `fail` роняет следующие вызовы метода заданными ошибками по очереди.
+ * Ответ из `answer` может быть промисом: так тест придерживает вызов. Метод без своего
+ * ответа отвечает сообщением с новым `message_id`, rich-сообщение — с `rich_message`, правки
+ * `editMessage*` — тем же сообщением. `fail` роняет следующие вызовы метода заданными
+ * ошибками по очереди.
  */
 export function fakeBot() {
 	const bot = new Bot('1:token', { botInfo: ME })
@@ -82,7 +78,7 @@ export function fakeBot() {
 					? 'channel'
 					: 'private',
 		},
-		text: p.text,
+		...(p.rich_message ? { rich_message: p.rich_message } : { text: p.text }),
 	})
 
 	bot.api.config.use(async (_prev, method, payload) => {
@@ -97,8 +93,6 @@ export function fakeBot() {
 		let result: unknown
 
 		if (answer) result = await answer(p)
-		else if (method === 'sendMediaGroup')
-			result = (p.media as unknown[]).map(() => message(p))
 		else if (method === 'sendPhoto')
 			result = {
 				...message(p),
@@ -113,29 +107,14 @@ export function fakeBot() {
 				caption: p.caption,
 			}
 		else if (OK_TRUE.has(method)) result = true
-		else if (EDITS.has(method)) {
-			const media = p.media as { media?: string; caption?: string } | undefined
-
+		else if (EDITS.has(method))
 			result = {
+				...message(p),
 				message_id: p.message_id,
-				date: 0,
 				edit_date: 1,
 				chat: { id: p.chat_id, type: 'private' },
-				...(media
-					? {
-							photo: [
-								{
-									file_id: media.media,
-									file_unique_id: 'u',
-									width: 1,
-									height: 1,
-								},
-							],
-							caption: media.caption,
-						}
-					: { text: p.text }),
 			}
-		} else result = message(p)
+		else result = message(p)
 
 		return { ok: true, result } as never
 	})

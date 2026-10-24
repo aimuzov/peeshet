@@ -33,7 +33,8 @@ test('create stores a draft', () => {
 test('create checks limits', () => {
 	const { db } = open()
 
-	assert.throws(() => draft(db, 'a'.repeat(5000)), Invalid)
+	assert.throws(() => draft(db, 'a'.repeat(32769)), Invalid)
+	assert.throws(() => draft(db, '![](tg://photo?id=p1)'), /p1/)
 })
 
 test('edit keeps revisions and revert restores them', () => {
@@ -157,15 +158,19 @@ test('list hides deleted and sorts by date', () => {
 	assert.deepEqual(db.scheduledTimes(), new Set([NOW + 10]))
 })
 
-test('media counts against caption limit', () => {
+test('text refers only to photos of its post, up to 50 of them', () => {
 	const { db } = open()
-	const post = draft(db, 'a'.repeat(2000))
+	const post = draft(db)
+	const withPhoto = 'Текст\n\n![](tg://photo?id=p1 "подпись")'
 
-	assert.throws(() => db.addMedia(post.id, 'f1'), /1024/)
-	db.setText(post.id, 'short')
+	assert.throws(() => db.setText(post.id, withPhoto), /p1/)
 	db.addMedia(post.id, 'f1')
-	db.addMedia(post.id, 'f2')
-	assert.throws(() => db.setText(post.id, 'a'.repeat(2000)), /1024/)
+	assert.equal(db.setText(post.id, withPhoto).text, withPhoto)
+
+	for (let i = 2; i <= 50; i++) db.addMedia(post.id, `f${i}`)
+
+	assert.throws(() => db.addMedia(post.id, 'f51'), /50/)
+	assert.equal(db.media(post.id).length, 50)
 })
 
 test('photos get keys p1, p2… in their post', () => {
@@ -207,22 +212,46 @@ test('a media table without keys is recreated on open', () => {
 	rmSync(dir, { recursive: true })
 })
 
+test('a cards table with the old kind column is recreated on open', () => {
+	const dir = mkdtempSync(join(tmpdir(), 'peeshet-'))
+	const path = join(dir, 'p.db')
+
+	new Db(path, () => NOW).create({ rubric: 'мысль', text: 'x' })
+	const raw = new DatabaseSync(path)
+
+	for (const sql of [
+		'DROP TABLE cards',
+		'CREATE TABLE cards (post_id INTEGER PRIMARY KEY REFERENCES posts(id), msg_id INTEGER NOT NULL UNIQUE, kind TEXT NOT NULL)',
+		`INSERT INTO cards (post_id, msg_id, kind) VALUES (1, 10, 'photo')`,
+	])
+		raw.prepare(sql).run()
+
+	raw.close()
+
+	const db = new Db(path, () => NOW)
+
+	assert.equal(db.card(1), null)
+	assert.equal(db.setCard(1, 20), null)
+	assert.deepEqual(db.card(1), { msgId: 20 })
+	rmSync(dir, { recursive: true })
+})
+
 test('card and extra messages map back to their post', () => {
 	const { db } = open()
 	const post = draft(db)
 
 	assert.equal(db.card(post.id), null)
-	assert.equal(db.setCard(post.id, 10, 'text'), null)
-	assert.deepEqual(db.card(post.id), { msgId: 10, kind: 'text' })
-	db.addExtra(post.id, 11, 'album')
+	assert.equal(db.setCard(post.id, 10), null)
+	assert.deepEqual(db.card(post.id), { msgId: 10 })
+	db.addExtra(post.id, 11, 'error')
 	db.addExtra(post.id, 12, 'error')
 	assert.equal(db.byPreview(10)?.id, post.id)
 	assert.equal(db.byPreview(11)?.id, post.id)
 	// Возвращает прежнее сообщение карточки, чтобы удалить именно его.
-	assert.equal(db.setCard(post.id, 20, 'photo'), 10)
+	assert.equal(db.setCard(post.id, 20), 10)
 	assert.equal(db.byPreview(10), null)
-	assert.deepEqual(db.card(post.id), { msgId: 20, kind: 'photo' })
-	assert.deepEqual(db.extras(post.id, 'album'), [11])
+	assert.deepEqual(db.card(post.id), { msgId: 20 })
+	assert.deepEqual(db.extras(post.id, 'error'), [11, 12])
 	assert.deepEqual(db.extras(post.id), [11, 12])
 	db.dropExtras([11])
 	assert.equal(db.byPreview(11), null)

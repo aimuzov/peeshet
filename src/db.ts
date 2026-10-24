@@ -22,6 +22,11 @@ const MEDIA = `CREATE TABLE IF NOT EXISTS media (
 	UNIQUE (post_id, key)
 )`
 
+const CARDS = `CREATE TABLE IF NOT EXISTS cards (
+	post_id INTEGER PRIMARY KEY REFERENCES posts(id),
+	msg_id INTEGER NOT NULL UNIQUE
+)`
+
 const SCHEMA = [
 	'PRAGMA journal_mode = WAL',
 	'PRAGMA foreign_keys = ON',
@@ -50,11 +55,7 @@ const SCHEMA = [
 	MEDIA,
 	// Прежняя схема карточки из нескольких сообщений, в базе разработки могла остаться.
 	'DROP TABLE IF EXISTS previews',
-	`CREATE TABLE IF NOT EXISTS cards (
-		post_id INTEGER PRIMARY KEY REFERENCES posts(id),
-		msg_id INTEGER NOT NULL UNIQUE,
-		kind TEXT NOT NULL
-	)`,
+	CARDS,
 	`CREATE TABLE IF NOT EXISTS extras (
 		msg_id INTEGER PRIMARY KEY,
 		post_id INTEGER NOT NULL REFERENCES posts(id),
@@ -96,11 +97,9 @@ export type NewPost = {
 	imagePrompt?: string | null
 }
 
-/** Чем карточка показана в чате: правкой текст в фото не превратить. */
-export type CardKind = 'text' | 'photo'
-export type Card = { msgId: number; kind: CardKind }
-/** Сообщения вокруг карточки: превью альбома и уведомление о сбое. */
-export type ExtraKind = 'album' | 'error'
+export type Card = { msgId: number }
+/** Сообщения вокруг карточки; осталось только уведомление о сбое. */
+export type ExtraKind = 'error'
 
 export type Media = { key: string; fileId: string }
 
@@ -156,6 +155,12 @@ export class Db {
 			this.#db.prepare(MEDIA).run()
 		}
 
+		// Карточки с видом (текст или фото) из прошлой схемы: rich-карточка пришлётся заново.
+		if (this.#columns('cards').includes('kind')) {
+			this.#db.prepare('DROP TABLE cards').run()
+			this.#db.prepare(CARDS).run()
+		}
+
 		// Фото раньше писались во входящие событием; теперь их разбирает сервер, сессии они не нужны.
 		this.#db
 			.prepare(
@@ -171,7 +176,7 @@ export class Db {
 	}
 
 	create(p: NewPost): Post {
-		checkLimits(p.text, 0)
+		checkLimits(p.text, [])
 		const t = this.#now()
 		const { lastInsertRowid } = this.#db
 			.prepare(
@@ -219,7 +224,7 @@ export class Db {
 		return this.#tx(() => {
 			const post = this.editable(id)
 
-			checkLimits(text, this.media(id).length)
+			checkLimits(text, this.#keys(id))
 
 			this.#db
 				.prepare(
@@ -274,7 +279,7 @@ export class Db {
 
 			if (!last) throw new Invalid('Прошлых ревизий нет.')
 
-			checkLimits(last.text, this.media(id).length)
+			checkLimits(last.text, this.#keys(id))
 			this.#db.prepare('DELETE FROM revisions WHERE id = ?').run(last.id)
 
 			return this.#update(id, { text: last.text })
@@ -368,22 +373,24 @@ export class Db {
 		return new Set(this.list(['scheduled']).map((p) => p.publishAt as number))
 	}
 
-	/** Ключ следующего фото поста: `p` и номер на единицу больше наибольшего. */
+	/**
+	 * Ключ следующего фото поста: `p` и номер на единицу больше наибольшего. Бросает
+	 * {@link Invalid}, если фото к посту больше не добавить.
+	 */
 	nextKey(id: number): string {
-		const last = Math.max(
-			0,
-			...this.media(id).map((m) => Number(m.key.slice(1)) || 0),
-		)
+		const post = this.editable(id)
+		const keys = this.#keys(id)
+		const last = Math.max(0, ...keys.map((k) => Number(k.slice(1)) || 0))
+		const key = `p${last + 1}`
 
-		return `p${last + 1}`
+		checkLimits(post.text, [...keys, key])
+
+		return key
 	}
 
 	addMedia(id: number, fileId: string): { post: Post; key: string } {
 		return this.#tx(() => {
-			const post = this.editable(id)
 			const key = this.nextKey(id)
-
-			checkLimits(post.text, this.media(id).length + 1)
 
 			this.#db
 				.prepare('INSERT INTO media (post_id, key, file_id) VALUES (?, ?, ?)')
@@ -403,25 +410,23 @@ export class Db {
 
 	card(id: number): Card | null {
 		const row = this.#db
-			.prepare('SELECT msg_id, kind FROM cards WHERE post_id = ?')
+			.prepare('SELECT msg_id FROM cards WHERE post_id = ?')
 			.get(id) as Row | undefined
 
-		return row
-			? { msgId: Number(row.msg_id), kind: row.kind as CardKind }
-			: null
+		return row ? { msgId: Number(row.msg_id) } : null
 	}
 
 	/** Запоминает сообщение карточки и возвращает прежнее, чтобы удалить именно его. */
-	setCard(id: number, msgId: number, kind: CardKind): number | null {
+	setCard(id: number, msgId: number): number | null {
 		return this.#tx(() => {
 			const old = this.card(id)?.msgId ?? null
 
 			this.#db
 				.prepare(
-					`INSERT INTO cards (post_id, msg_id, kind) VALUES (?, ?, ?)
-					ON CONFLICT (post_id) DO UPDATE SET msg_id = excluded.msg_id, kind = excluded.kind`,
+					`INSERT INTO cards (post_id, msg_id) VALUES (?, ?)
+					ON CONFLICT (post_id) DO UPDATE SET msg_id = excluded.msg_id`,
 				)
-				.run(id, msgId, kind)
+				.run(id, msgId)
 
 			return old
 		})
@@ -525,6 +530,10 @@ export class Db {
 			.all(this.#now() - age) as Row[]
 
 		return rows.map(toInbox)
+	}
+
+	#keys(id: number): string[] {
+		return this.media(id).map((m) => m.key)
 	}
 
 	#columns(table: string): string[] {

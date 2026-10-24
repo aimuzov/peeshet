@@ -1,22 +1,13 @@
-// Карточка поста в личке владельца: одно сообщение с постом и кнопками, строка статуса — верхняя кнопка.
+// Карточка поста в личке владельца: одно rich-сообщение ровно как пост в канале и кнопки,
+// строка статуса — верхняя кнопка.
 // Данные кнопок: `<действие>:<id поста>[:<аргумент>]`, разбирает их bot.ts.
 
-import {
-	GrammyError,
-	InlineKeyboard,
-	InputMediaBuilder,
-	type Api,
-} from 'grammy'
-import type { InlineKeyboardButton } from 'grammy/types'
+import { GrammyError, InlineKeyboard, type Api } from 'grammy'
+import type { InlineKeyboardButton, InputRichMessage } from 'grammy/types'
 
-import {
-	STATUS_RU,
-	type Card,
-	type CardKind,
-	type Db,
-	type ExtraKind,
-} from '#src/db.ts'
+import { STATUS_RU, type Db, type ExtraKind } from '#src/db.ts'
 import type { Post } from '#src/post.ts'
+import { richMessage, send } from '#src/send.ts'
 import { formatMsk, todayAt } from '#src/time.ts'
 
 export type CardsConfig = { ownerId: number; channelId: string }
@@ -30,7 +21,7 @@ export const channelLink = (channelId: string, msgId: number) =>
 const STATUS_LIMIT = 64
 const SEP = ' · '
 
-export function statusLine(post: Post, media = 0): string {
+export function statusLine(post: Post): string {
 	const when =
 		post.status === 'scheduled' && post.publishAt
 			? ` на ${formatMsk(post.publishAt)}`
@@ -40,19 +31,18 @@ export function statusLine(post: Post, media = 0): string {
 		`${STATUS_RU[post.status]}${when}`,
 		`голос ${post.voice ?? '—'}`,
 	].join(' · ')
-	const tail = media > 1 ? ` · альбом, ${media} фото` : ''
 	const projects = [...post.projects.join(', ')]
 	// Строка живёт в кнопке: длинный список проектов обрезаем, остальное важнее.
-	const room = STATUS_LIMIT - head.length - tail.length - SEP.length
+	const room = STATUS_LIMIT - head.length - SEP.length
 
-	if (!projects.length || room < 2) return head + tail
+	if (!projects.length || room < 2) return head
 
 	const fit =
 		projects.length > room
 			? `${projects.slice(0, room - 1).join('')}…`
 			: projects.join('')
 
-	return head + SEP + fit + tail
+	return head + SEP + fit
 }
 
 type Button = InlineKeyboardButton
@@ -95,15 +85,10 @@ function actions(post: Post, channelId: string): Button[] {
 }
 
 /** Кнопки карточки: сверху статус, нажатие на него ничего не делает, ниже действия. */
-export function keyboard(
-	post: Post,
-	channelId: string,
-	media = 0,
-): InlineKeyboard {
+export function keyboard(post: Post, channelId: string): InlineKeyboard {
 	const rows = [
-		[InlineKeyboard.text(statusLine(post, media), `n:${post.id}`)],
+		[InlineKeyboard.text(statusLine(post), `n:${post.id}`)],
 		actions(post, channelId),
-		media > 1 ? [InlineKeyboard.text('Альбом', `a:${post.id}`)] : [],
 	]
 
 	return new InlineKeyboard(rows.filter((r) => r.length))
@@ -135,8 +120,8 @@ const is400 = (e: unknown, text = ''): e is GrammyError =>
 export const notModified = (e: unknown) => is400(e, 'message is not modified')
 
 /**
- * Карточка поста в личке владельца — одно сообщение, которое правится на месте: текст
- * поста или первое фото с подписью, сверху клавиатуры строка статуса.
+ * Карточка поста в личке владельца — одно rich-сообщение, которое правится на месте, сверху
+ * клавиатуры строка статуса.
  */
 export class Cards {
 	readonly #api: Api
@@ -153,30 +138,6 @@ export class Cards {
 	/** Перерисовывает карточку на месте; новую присылает, только если старую не поправить. */
 	show(id: number): Promise<void> {
 		return this.#serial(id, () => this.#show(id))
-	}
-
-	/** Карточка показывает только первое фото, а весь альбом присылаем по кнопке. */
-	album(id: number): Promise<void> {
-		return this.#serial(id, async () => {
-			const post = this.#db.get(id)
-			const media = this.#db.media(id).map((m) => m.fileId)
-
-			if (media.length < 2) return
-
-			await this.#clean(id, 'album')
-			const msgs = await this.#api.sendMediaGroup(
-				this.#cfg.ownerId,
-				media.map((fileId, i) =>
-					InputMediaBuilder.photo(
-						fileId,
-						i === 0 ? { caption: post.text } : {},
-					),
-				),
-				this.#replyTo(id),
-			)
-
-			for (const m of msgs) this.#db.addExtra(id, m.message_id, 'album')
-		})
 	}
 
 	/**
@@ -234,29 +195,25 @@ export class Cards {
 
 	async #show(id: number): Promise<void> {
 		const post = this.#db.get(id)
-		const media = this.#db.media(id).map((m) => m.fileId)
-		const kind: CardKind = media.length ? 'photo' : 'text'
-		const reply_markup = keyboard(post, this.#cfg.channelId, media.length)
+		const media = this.#db.media(id)
+		const reply_markup = keyboard(post, this.#cfg.channelId)
 		const card = this.#db.card(id)
 
 		if (
 			!card ||
-			card.kind !== kind ||
-			!(await this.#edit(card, post.text, media, reply_markup))
+			!(await this.#edit(
+				card.msgId,
+				richMessage(post.text, media),
+				reply_markup,
+			))
 		) {
-			const owner = this.#cfg.ownerId
-			const msg = media.length
-				? await this.#api.sendPhoto(owner, media[0], {
-						caption: post.text,
-						reply_markup,
-					})
-				: await this.#api.sendMessage(owner, post.text, { reply_markup })
-			const old = this.#db.setCard(id, msg.message_id, kind)
+			const msgId = await send(this.#api, this.#cfg.ownerId, post.text, media, {
+				reply_markup,
+			})
+			const old = this.#db.setCard(id, msgId)
 
-			if (old !== null && old !== msg.message_id) await this.#delete([old])
+			if (old !== null && old !== msgId) await this.#delete([old])
 		}
-
-		await this.#clean(id, 'album')
 
 		// Пока пост не вышел, причина нужна владельцу и после перерисовки.
 		if (post.status !== 'failed') await this.#clean(id, 'error')
@@ -284,25 +241,14 @@ export class Cards {
 
 	/** `false`, если сообщение уже не поправить: старое, удалённое и прочие 400. */
 	async #edit(
-		card: Card,
-		text: string,
-		media: string[],
+		msgId: number,
+		rich: InputRichMessage,
 		reply_markup: InlineKeyboard,
 	): Promise<boolean> {
 		const owner = this.#cfg.ownerId
 
 		try {
-			if (card.kind === 'text')
-				await this.#api.editMessageText(owner, card.msgId, text, {
-					reply_markup,
-				})
-			else
-				await this.#api.editMessageMedia(
-					owner,
-					card.msgId,
-					InputMediaBuilder.photo(media[0], { caption: text }),
-					{ reply_markup },
-				)
+			await this.#api.editMessageText(owner, msgId, rich, { reply_markup })
 
 			return true
 		} catch (e) {
@@ -313,7 +259,7 @@ export class Cards {
 
 		// Содержимое то же: на случай, если Telegram не сравнил кнопки, обновляем их отдельно.
 		try {
-			await this.#api.editMessageReplyMarkup(owner, card.msgId, {
+			await this.#api.editMessageReplyMarkup(owner, msgId, {
 				reply_markup,
 			})
 		} catch (e) {

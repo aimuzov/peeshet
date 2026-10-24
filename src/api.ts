@@ -13,7 +13,6 @@ import { GrammyError, InputFile, type Api } from 'grammy'
 import type { Cards } from '#src/cards.ts'
 import type { Db } from '#src/db.ts'
 import {
-	checkLimits,
 	Invalid,
 	isRubric,
 	NotFound,
@@ -197,9 +196,7 @@ export function serve(deps: ApiDeps): Server {
 			throw new Invalid('Нужен Content-Type image/*.')
 
 		// Заранее: негодный пост не должен получить картинку в личку владельцу.
-		const post = db.editable(id)
-
-		checkLimits(post.text, db.media(id).length + 1)
+		db.nextKey(id)
 		const bytes = await readBody(req)
 		// Bot API отдаёт file_id только у отправленного файла, поэтому картинка уходит
 		// владельцу и сразу удаляется: дальше пост ссылается на file_id.

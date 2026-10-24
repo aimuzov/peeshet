@@ -103,10 +103,10 @@ export class Scheduler {
 
 		if (!post) return
 
-		const media = this.#db.media(post.id).map((m) => m.fileId)
+		const media = this.#db.media(post.id)
 		// Ловим только ошибки отправки: если упадёт уведомление после неё, пост уже вышел,
 		// и переводить его в failed нельзя.
-		const ids = await retry(
+		const msgId = await retry(
 			() => send(this.#api, this.#cfg.channelId, post.text, media),
 			this.#sleep,
 		).catch(async (e: unknown) => {
@@ -116,9 +116,9 @@ export class Scheduler {
 			return null
 		})
 
-		if (!ids) return
+		if (msgId === null) return
 
-		this.#db.published(post.id, ids[0])
+		this.#db.published(post.id, msgId)
 
 		// Пост уже вышел: сбой карточки состояние не меняет.
 		// Карточку повторяем при 429 и обрыве: иначе она застрянет в «публикуется».

@@ -144,7 +144,7 @@ test('an expired prompt is deleted with the next message', async () => {
 test('reply to a card is an edit request for that post', async () => {
 	const { fake, db, post } = setup()
 
-	db.setCard(post.id, 500, 'text')
+	db.setCard(post.id, 500)
 	await fake.feed(text('сократи', { replyTo: 500 }))
 	const item = db.take()
 
@@ -200,12 +200,20 @@ test('delete asks first', async () => {
 test('photo in reply to a card is attached and the owner message removed', async () => {
 	const { fake, db, post } = setup()
 
-	db.setCard(post.id, 600, 'text')
+	db.setCard(post.id, 600)
 	const update = photo('big', { replyTo: 600 })
 
 	await fake.feed(update)
 	assert.deepEqual(db.media(post.id), [{ key: 'p1', fileId: 'big' }])
-	assert.equal(fake.named('sendPhoto')[0].photo, 'big')
+	assert.equal(db.get(post.id).text, 'Пост\n\n![](tg://photo?id=p1)')
+	const [edit] = fake.named('editMessageText')
+
+	assert.equal(edit.message_id, 600)
+
+	assert.deepEqual(edit.rich_message, {
+		markdown: 'Пост\n\n![](tg://photo?id=p1)',
+		media: [{ id: 'p1', media: { type: 'photo', media: 'big' } }],
+	})
 
 	assert.deepEqual(fake.named('deleteMessage'), [
 		{ chat_id: OWNER, message_id: update.message.message_id },
@@ -216,36 +224,59 @@ test('photo in reply to a card is attached and the owner message removed', async
 	assert.equal(fake.named('sendMessage').length, 0)
 })
 
-test('a photo in reply to an album preview goes to that post', async () => {
+test('an album in reply becomes photos p1..p3 in order on one card', async () => {
 	const { fake, db, post } = setup()
 
-	db.addMedia(post.id, 'f1')
-	db.addMedia(post.id, 'f2')
-	db.setCard(post.id, 600, 'photo')
-	db.addExtra(post.id, 601, 'album')
-	await fake.feed(photo('f3', { replyTo: 601 }))
+	db.setCard(post.id, 600)
+	const album = ['a', 'b', 'c'].map((f) => photo(f, { replyTo: 600 }))
 
-	assert.deepEqual(
-		db.media(post.id).map((m) => m.fileId),
-		['f1', 'f2', 'f3'],
+	await Promise.all(album.map((u) => fake.feed(u)))
+
+	assert.deepEqual(db.media(post.id), [
+		{ key: 'p1', fileId: 'a' },
+		{ key: 'p2', fileId: 'b' },
+		{ key: 'p3', fileId: 'c' },
+	])
+
+	assert.equal(
+		db.get(post.id).text,
+		'Пост\n\n![](tg://photo?id=p1)\n\n![](tg://photo?id=p2)\n\n![](tg://photo?id=p3)',
 	)
 
-	assert.equal(fake.named('editMessageMedia')[0].message_id, 600)
-	assert.deepEqual(db.extras(post.id), [])
+	assert.equal(fake.named('sendRichMessage').length, 0)
+	assert.equal(db.card(post.id)?.msgId, 600)
+
+	const last = fake.named('editMessageText').at(-1)?.rich_message as {
+		media: { id: string }[]
+	}
+
+	assert.deepEqual(
+		last.media.map((m) => m.id),
+		['p1', 'p2', 'p3'],
+	)
+
+	assert.deepEqual(
+		fake
+			.named('deleteMessage')
+			.map((p) => p.message_id)
+			.sort(),
+		album.map((u) => u.message.message_id).sort(),
+	)
 })
 
-test('a photo caption still reaches the session', async () => {
+test('a photo caption becomes the caption of the picture', async () => {
 	const { fake, db, post } = setup()
 
-	db.setCard(post.id, 600, 'text')
-	await fake.feed(photo('big', { replyTo: 600, caption: 'поставь первой' }))
-	const item = db.take()
+	db.setCard(post.id, 600)
+	await fake.feed(photo('big', { replyTo: 600, caption: 'Это "оно"' }))
 
-	assert.equal(item?.kind, 'reply')
-	assert.equal(item?.postId, post.id)
-	assert.equal(item?.text, 'поставь первой')
-	// Само фото уже удалено, удалять при ack нечего.
-	assert.equal(item?.srcMsgId, null)
+	assert.equal(
+		db.get(post.id).text,
+		'Пост\n\n![](tg://photo?id=p1 "Это \\"оно\\"")',
+	)
+
+	// Подпись разобрал сервер, сессии тут делать нечего.
+	assert.equal(db.take(), null)
 })
 
 test('a photo without a card gets a hint', async () => {
@@ -348,7 +379,7 @@ test('edit on one card, then a reply to another card goes to the other post', as
 	const { fake, db, post } = setup()
 	const other = db.create({ rubric: 'мысль', text: 'Другой' })
 
-	db.setCard(other.id, 700, 'text')
+	db.setCard(other.id, 700)
 	await fake.feed(press(`e:${post.id}`))
 	await fake.feed(text('сократи', { replyTo: 700 }))
 	const item = db.take()
@@ -401,8 +432,8 @@ test('today and next presets schedule the post', async () => {
 test('delete flow shows the confirm menu and xx hides the card', async () => {
 	const { fake, db, post } = setup()
 
-	db.setCard(post.id, 800, 'text')
-	db.addExtra(post.id, 801, 'album')
+	db.setCard(post.id, 800)
+	db.addExtra(post.id, 801, 'error')
 	await fake.feed(press(`x:${post.id}`, { msgId: 800 }))
 	assert.equal(fake.named('editMessageReplyMarkup').length, 1)
 	assert.equal(fake.named('editMessageReplyMarkup')[0].message_id, 800)
@@ -414,7 +445,7 @@ test('delete flow shows the confirm menu and xx hides the card', async () => {
 test('«Назад» from a menu restores the card in place', async () => {
 	const { fake, db, post } = setup()
 
-	db.setCard(post.id, 800, 'text')
+	db.setCard(post.id, 800)
 	await fake.feed(press(`d:${post.id}`, { msgId: 800 }))
 	await fake.feed(press(`o:${post.id}`, { msgId: 800 }))
 	const [edit] = fake.named('editMessageText')
@@ -432,23 +463,19 @@ test('the status button answers silently', async () => {
 	assert.deepEqual(fake.named('answerCallbackQuery')[0].text, undefined)
 })
 
-test('the album button sends the whole album', async () => {
-	const { fake, db, post } = setup()
+test('the album button is gone', async () => {
+	const { fake, post } = setup()
 
-	db.addMedia(post.id, 'f1')
-	db.addMedia(post.id, 'f2')
-	db.setCard(post.id, 800, 'photo')
 	await fake.feed(press(`a:${post.id}`, { msgId: 800 }))
-	assert.equal(fake.named('sendMediaGroup').length, 1)
-	assert.equal(db.extras(post.id, 'album').length, 2)
-	assert.equal(fake.named('answerCallbackQuery').length, 1)
+	assert.equal(fake.named('sendMediaGroup').length, 0)
+	assert.equal(fake.named('answerCallbackQuery')[0].show_alert, true)
 })
 
-test('a reply to an album preview goes to that post', async () => {
+test('a reply to the failure notice goes to that post', async () => {
 	const { fake, db, post } = setup()
 
-	db.setCard(post.id, 800, 'photo')
-	db.addExtra(post.id, 802, 'album')
+	db.setCard(post.id, 800)
+	db.addExtra(post.id, 802, 'error')
 	await fake.feed(text('поменяй порядок', { replyTo: 802 }))
 	const item = db.take()
 
@@ -460,8 +487,11 @@ test('/queue «Открыть» sends a fresh card when there is none', async ()
 	const { fake, post } = setup()
 
 	await fake.feed(press(`o:${post.id}`))
-	assert.equal(fake.named('sendMessage').length, 1)
-	assert.equal(fake.named('sendMessage')[0].text, 'Пост')
+	assert.equal(fake.named('sendRichMessage').length, 1)
+
+	assert.deepEqual(fake.named('sendRichMessage')[0].rich_message, {
+		markdown: 'Пост',
+	})
 })
 
 test('owner messages in a group are ignored', async () => {
@@ -538,12 +568,13 @@ test('a photo is kept even when the card refresh fails', async () => {
 	const log = console.error
 
 	console.error = () => {}
-	db.setCard(post.id, 600, 'text')
-	fake.fail('sendPhoto', apiError('sendPhoto', 500, 'oops'))
+	db.setCard(post.id, 600)
+	fake.fail('editMessageText', apiError('editMessageText', 500, 'oops'))
 
 	await fake.feed(photo('big', { replyTo: 600 }))
 	console.error = log
 	assert.deepEqual(db.media(post.id), [{ key: 'p1', fileId: 'big' }])
+	assert.equal(db.get(post.id).text, 'Пост\n\n![](tg://photo?id=p1)')
 	assert.equal(db.take(), null)
 	// Карточку не обновили: фото владельца остаётся, чтобы было видно, что пришло.
 	assert.equal(fake.named('deleteMessage').length, 0)

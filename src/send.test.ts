@@ -1,25 +1,45 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { reason, retry, send } from '#src/send.ts'
+import { reason, retry, richMessage, send } from '#src/send.ts'
 import { apiError, fakeBot, networkError } from '#src/testing.ts'
 
 const noSleep = async () => {}
 
-test('text, photo and album go through the right method', async () => {
+const media = [
+	{ key: 'p1', fileId: 'f1' },
+	{ key: 'p2', fileId: 'f2' },
+	{ key: 'p3', fileId: 'f3' },
+]
+
+test('a rich message carries only the photos the text refers to', () => {
+	const text =
+		'Привет\n\n![](tg://photo?id=p3 "третье")\n\n![](tg://photo?id=p1)'
+
+	assert.deepEqual(richMessage(text, media), {
+		markdown: text,
+		media: [
+			{ id: 'p3', media: { type: 'photo', media: 'f3' } },
+			{ id: 'p1', media: { type: 'photo', media: 'f1' } },
+		],
+	})
+
+	assert.deepEqual(richMessage('Без фото', media), { markdown: 'Без фото' })
+})
+
+test('a post goes out as one rich message', async () => {
 	const fake = fakeBot()
+	const text = 'Пост\n\n![](tg://photo?id=p2)'
+	const id = await send(fake.api, 5, text, media, {
+		reply_markup: { inline_keyboard: [] },
+	})
+	const [sent] = fake.named('sendRichMessage')
 
-	assert.equal((await send(fake.api, 5, 'hi', [])).length, 1)
-	await send(fake.api, 5, 'cap', ['f1'])
-	const album = await send(fake.api, 5, 'cap', ['f1', 'f2', 'f3'])
-
-	assert.equal(album.length, 3)
-	assert.equal(fake.named('sendMessage')[0].text, 'hi')
-	assert.equal(fake.named('sendPhoto')[0].caption, 'cap')
-	const media = fake.named('sendMediaGroup')[0].media as { caption?: string }[]
-
-	assert.equal(media[0].caption, 'cap')
-	assert.equal(media[1].caption, undefined)
+	assert.equal(typeof id, 'number')
+	assert.equal(fake.calls.length, 1)
+	assert.equal(sent.chat_id, 5)
+	assert.deepEqual(sent.rich_message, richMessage(text, media))
+	assert.deepEqual(sent.reply_markup, { inline_keyboard: [] })
 })
 
 test('retry repeats ECONNREFUSED and 429, then gives up after 4 calls', async () => {

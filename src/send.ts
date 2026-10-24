@@ -2,30 +2,39 @@
 
 import { setTimeout as delay } from 'node:timers/promises'
 import { GrammyError, HttpError, InputMediaBuilder, type Api } from 'grammy'
+import type { InputRichMessage } from 'grammy/types'
+
+import type { Media } from '#src/db.ts'
+import { photoKeys } from '#src/post.ts'
 
 const ATTEMPTS = 4 // первая попытка и три повтора
 const PAUSE = 5000
 
-/** Отправляет пост и возвращает id всех его сообщений по порядку. */
+/** Rich-сообщение поста: из фото берём только те, что стоят в тексте. */
+export function richMessage(text: string, media: Media[]): InputRichMessage {
+	const fileIds = new Map(media.map((m) => [m.key, m.fileId]))
+	const used = photoKeys(text).flatMap((key) => {
+		const fileId = fileIds.get(key)
+
+		return fileId ? [{ id: key, media: InputMediaBuilder.photo(fileId) }] : []
+	})
+
+	return used.length ? { markdown: text, media: used } : { markdown: text }
+}
+
+type Other = Parameters<Api['sendRichMessage']>[2]
+
+/** Отправляет пост одним rich-сообщением и возвращает его id. */
 export async function send(
 	api: Api,
 	chatId: number | string,
 	text: string,
-	media: string[],
-): Promise<number[]> {
-	if (media.length === 0)
-		return [(await api.sendMessage(chatId, text)).message_id]
+	media: Media[],
+	other?: Other,
+): Promise<number> {
+	const msg = await api.sendRichMessage(chatId, richMessage(text, media), other)
 
-	if (media.length === 1)
-		return [
-			(await api.sendPhoto(chatId, media[0], { caption: text })).message_id,
-		]
-
-	const album = media.map((fileId, i) =>
-		InputMediaBuilder.photo(fileId, i === 0 ? { caption: text } : {}),
-	)
-
-	return (await api.sendMediaGroup(chatId, album)).map((m) => m.message_id)
+	return msg.message_id
 }
 
 const NOT_SENT = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN'])
