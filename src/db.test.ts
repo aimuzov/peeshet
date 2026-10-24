@@ -17,6 +17,14 @@ function open() {
 	return { db, clock }
 }
 
+const quiet = () => {
+	const log = console.error
+
+	console.error = () => {}
+
+	return () => void (console.error = log)
+}
+
 const draft = (db: Db, text = 'Привет') =>
 	db.create({ rubric: 'девлог', text, projects: ['sorebody'] })
 
@@ -391,12 +399,36 @@ test('undoText takes back an edit telegram did not accept', () => {
 	db.setText(post.id, 'v3')
 	const [last] = db.revisions(post.id)
 
-	assert.equal(db.undoText(post.id, last.id).text, 'v2')
+	assert.equal(db.undoText(post.id, last.id), true)
+	assert.equal(db.get(post.id).text, 'v2')
 
 	assert.deepEqual(
 		db.revisions(post.id).map((r) => r.text),
 		['v1'],
 	)
 
-	assert.throws(() => db.undoText(post.id, last.id), NotFound)
+	// Ревизию уже забрали: отменять нечего, и это не ошибка запроса.
+	const restore = quiet()
+
+	assert.equal(db.undoText(post.id, last.id), false)
+	restore()
+	assert.equal(db.get(post.id).text, 'v2')
+})
+
+test('undoText leaves a published post alone', () => {
+	const { db } = open()
+	const post = draft(db, 'v1')
+
+	db.setText(post.id, 'v2')
+	const [last] = db.revisions(post.id)
+
+	db.schedule(post.id, NOW)
+	db.claim(post.id)
+	db.published(post.id, 7)
+	const restore = quiet()
+
+	assert.equal(db.undoText(post.id, last.id), false)
+	restore()
+	assert.equal(db.get(post.id).text, 'v2')
+	assert.equal(db.revisions(post.id).length, 1)
 })

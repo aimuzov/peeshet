@@ -288,19 +288,21 @@ export class Db {
 
 	/**
 	 * Отменяет правку, которую не принял Telegram: возвращает текст ревизии `revisionId` и
-	 * забирает её. Статус не проверяет: пост могли запланировать, пока карточка рисовалась.
+	 * забирает её. `false` — отменять уже нечего или нельзя: ревизии нет, пост вышел или
+	 * выходит. Это не ошибка запроса: владелец и так узнает, что Telegram правку не принял.
 	 */
-	undoText(id: number, revisionId: number): Post {
+	undoText(id: number, revisionId: number): boolean {
 		return this.#tx(() => {
 			const row = this.#db
 				.prepare('SELECT text FROM revisions WHERE id = ? AND post_id = ?')
 				.get(revisionId, id) as Row | undefined
 
-			if (!row) throw new NotFound(`Ревизии ${revisionId} нет.`)
+			if (!this.#undoable(id, row !== undefined)) return false
 
 			this.#db.prepare('DELETE FROM revisions WHERE id = ?').run(revisionId)
+			this.#update(id, { text: String(row?.text) })
 
-			return this.#update(id, { text: String(row.text) })
+			return true
 		})
 	}
 
@@ -548,6 +550,18 @@ export class Db {
 			.all(this.#now() - age) as Row[]
 
 		return rows.map(toInbox)
+	}
+
+	#undoable(id: number, found: boolean): boolean {
+		const { status } = this.get(id)
+
+		if (found && EDITABLE.includes(status)) return true
+
+		console.error(
+			`post ${id}: undo skipped (${found ? status : 'revision is gone'})`,
+		)
+
+		return false
 	}
 
 	#keys(id: number): string[] {

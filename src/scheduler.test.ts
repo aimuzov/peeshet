@@ -8,6 +8,7 @@ import {
 	apiError,
 	CHANNEL,
 	fakeBot,
+	MARKUP_ERROR,
 	networkError,
 	OWNER,
 } from '#src/testing.ts'
@@ -371,4 +372,43 @@ test('overlapping ticks send one nudge', async () => {
 			.length,
 		1,
 	)
+})
+
+test('publishing waits for a revise in flight and sends its final text', async () => {
+	const { fake, db, scheduler, post, cards } = setup()
+	let release = () => {}
+	const gate = new Promise<void>((resolve) => (release = resolve))
+
+	await cards.show(post.id)
+	db.schedule(post.id, NOW)
+
+	// Telegram думает над правкой карточки и в итоге её разметку не принимает.
+	fake.answer('editMessageText', async (p) => {
+		if (!markdown(p).includes('$$'))
+			return { ...reply(p), message_id: p.message_id }
+
+		await gate
+
+		throw apiError('editMessageText', 400, MARKUP_ERROR)
+	})
+
+	fake.answer('sendRichMessage', (p) => {
+		if (markdown(p).includes('$$'))
+			throw apiError('sendRichMessage', 400, MARKUP_ERROR)
+
+		return reply(p)
+	})
+
+	const revising = cards.revise(post.id, () => 'Формула $$')
+	const ticking = scheduler.tick()
+
+	await new Promise((resolve) => setImmediate(resolve))
+	assert.equal(toChannel(fake).length, 0)
+	assert.equal(db.get(post.id).status, 'scheduled')
+	release()
+	await assert.rejects(revising, /не принял/)
+	await ticking
+	assert.deepEqual(toChannel(fake).map(markdown), ['Пост'])
+	assert.equal(db.get(post.id).status, 'published')
+	assert.equal(db.revisions(post.id).length, 0)
 })

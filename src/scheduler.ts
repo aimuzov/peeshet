@@ -98,31 +98,44 @@ export class Scheduler {
 	}
 
 	async #publish(snapshot: Post): Promise<void> {
-		// Пока шли предыдущие посты, этот могли поправить или перенести: публикуем свежую версию.
-		const post = this.#db.claim(snapshot.id)
+		const id = snapshot.id
+		// В очереди поста: правка, которую сейчас проверяет Telegram, сперва примется или
+		// откатится, и в канал уйдёт уже её итог.
+		const outcome = await this.#cards.exclusive(id, async () => {
+			// Пока шли предыдущие посты, этот могли поправить или перенести: публикуем свежую версию.
+			const post = this.#db.claim(id)
 
-		if (!post) return
+			if (!post) return 'skipped'
 
-		const media = this.#db.media(post.id)
-		// Ловим только ошибки отправки: если упадёт уведомление после неё, пост уже вышел,
-		// и переводить его в failed нельзя.
-		const msgId = await retry(
-			() => send(this.#api, this.#cfg.channelId, post.text, media),
-			this.#sleep,
-		).catch(async (e: unknown) => {
-			this.#db.failed(post.id, reason(e))
-			await this.#cards.failure(post.id).catch(log('failure card failed'))
+			const media = this.#db.media(id)
 
-			return null
+			// Ловим только ошибки отправки: если упадёт уведомление после неё, пост уже вышел,
+			// и переводить его в failed нельзя.
+			try {
+				const msgId = await retry(
+					() => send(this.#api, this.#cfg.channelId, post.text, media),
+					this.#sleep,
+				)
+
+				this.#db.published(id, msgId)
+
+				return 'published'
+			} catch (e) {
+				this.#db.failed(id, reason(e))
+
+				return 'failed'
+			}
 		})
 
-		if (msgId === null) return
+		// Карточки рисуются в той же очереди, поэтому уже после неё.
+		if (outcome === 'failed')
+			await this.#cards.failure(id).catch(log('failure card failed'))
 
-		this.#db.published(post.id, msgId)
+		if (outcome !== 'published') return
 
 		// Пост уже вышел: сбой карточки состояние не меняет.
 		// Карточку повторяем при 429 и обрыве: иначе она застрянет в «публикуется».
-		await retry(() => this.#cards.show(post.id), this.#sleep).catch(
+		await retry(() => this.#cards.show(id), this.#sleep).catch(
 			log('published card failed'),
 		)
 	}
