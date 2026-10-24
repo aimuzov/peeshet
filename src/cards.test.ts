@@ -479,3 +479,53 @@ test('a new post with rejected markup does not stay in the queue', async () => {
 		[post.id],
 	)
 })
+
+const chatNotFound = (method: string) =>
+	apiError(method, 400, 'Bad Request: chat not found')
+
+test('a chat error keeps a new post in the queue', async () => {
+	const { fake, db, cards } = setup()
+	const restore = quiet()
+
+	fake.fail('sendRichMessage', chatNotFound('sendRichMessage'))
+	const { post, card } = await cards.create({ rubric: 'релиз', text: 'Вышло' })
+
+	restore()
+	assert.equal(card, false)
+	assert.equal(db.get(post.id).status, 'draft')
+	assert.ok(db.list().some((p) => p.id === post.id))
+})
+
+test('a chat error keeps the revised text', async () => {
+	const { fake, db, cards, post } = setup()
+	const restore = quiet()
+
+	await cards.show(post.id)
+	fake.fail('editMessageText', chatNotFound('editMessageText'))
+	fake.fail('sendRichMessage', chatNotFound('sendRichMessage'))
+	const card = await cards.revise(post.id, () => 'Новый')
+
+	restore()
+	assert.equal(card, false)
+	assert.equal(db.get(post.id).text, 'Новый')
+})
+
+test('a photo telegram cannot use is a content rejection', async () => {
+	const { fake, db, cards, post } = setup()
+
+	fake.fail(
+		'sendRichMessage',
+		apiError(
+			'sendRichMessage',
+			400,
+			'Bad Request: wrong file identifier/HTTP URL specified',
+		),
+	)
+
+	await assert.rejects(
+		cards.revise(post.id, () => 'Новый'),
+		/Telegram не принял разметку: Bad Request: wrong file identifier/,
+	)
+
+	assert.equal(db.get(post.id).text, 'Текст')
+})

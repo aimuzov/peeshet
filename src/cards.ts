@@ -119,12 +119,28 @@ const is400 = (e: unknown, text = ''): e is GrammyError =>
 /** Правка без изменений: Telegram отвечает 400, но карточка и так верная. */
 export const notModified = (e: unknown) => is400(e, 'message is not modified')
 
+// 400, в которых виноват чат, а не пост: правку в них не откатываем.
+const CHAT_ERRORS = [
+	'chat not found',
+	'user not found',
+	'peer_id_invalid',
+	'chat_id is empty',
+	'bot was blocked',
+	'not enough rights',
+]
+
 /**
- * Telegram не принял содержимое поста. Правка карточки на любой 400 откатывается к отправке
- * новой, поэтому 400 на саму отправку — это уже разметка, а не старое или удалённое сообщение.
+ * Telegram не принял содержимое поста: разметку или фото. Правка карточки на любой 400
+ * откатывается к отправке новой, поэтому 400 на саму отправку — уже про содержимое, а не
+ * про старое или удалённое сообщение. Кроме ошибок чата: с постом там всё в порядке.
  */
-const rejected = (e: unknown): e is GrammyError =>
-	is400(e) && e.method === 'sendRichMessage'
+const rejected = (e: unknown): e is GrammyError => {
+	if (!is400(e) || e.method !== 'sendRichMessage') return false
+
+	const description = e.description.toLowerCase()
+
+	return !CHAT_ERRORS.some((s) => description.includes(s))
+}
 
 /**
  * Карточка поста в личке владельца — одно rich-сообщение, которое правится на месте, сверху
