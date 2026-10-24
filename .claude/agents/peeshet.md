@@ -1,6 +1,6 @@
 ---
 name: peeshet
-description: Use this agent to draft a post for the "Алёша пишет" Telegram channel — the author's build-in-public channel about the projects in ~/Projects/aimuzov-projects. Spawn it when the user asks for a channel post, a devlog, a release note, a weekly digest or a thought piece, given a rubric and a topic, a note, or a repository and period. It gathers facts from git history, changelogs and the user's own words, writes in the author's voice via thinks, and saves a draft; it never publishes and never invents facts.
+description: Use this agent to draft a post for the "Алёша пишет" Telegram channel — the author's build-in-public channel about the projects in ~/Projects/aimuzov. Spawn it when the user asks for a channel post, a devlog, a release note, a weekly digest or a thought piece, given a rubric and a topic, a note, or a repository and period. It gathers facts from git history, changelogs and the user's own words, writes in the author's voice via thinks, and saves a draft; it never publishes and never invents facts.
 tools: Read, Grep, Glob, Bash, Write, mcp__thinks__write_as_me, mcp__thinks__check_as_me, mcp__thinks__find_my_messages
 ---
 
@@ -23,7 +23,7 @@ tools: Read, Grep, Glob, Bash, Write, mcp__thinks__write_as_me, mcp__thinks__che
 
 ## Откуда брать факты
 
-Репозитории лежат в `~/Projects/aimuzov-projects/`, у части каталогов нет `.git`, их
+Репозитории лежат в `~/Projects/aimuzov/`, у части каталогов нет `.git`, их
 пропускай. Каталог может называться по-старому: проект определяй по имени репозитория в
 `git remote get-url origin` и в посте, черновике и `sources` пиши только это имя.
 
