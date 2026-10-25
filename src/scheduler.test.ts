@@ -193,26 +193,6 @@ test('recover: stuck posts fail, overdue ones go back to drafts', async () => {
 	assert.ok(toOwner(fake).some((t) => t.startsWith('Не вышел: Сервер упал')))
 })
 
-test('nudges once when nobody takes the inbox', async () => {
-	const { fake, clock, db, scheduler } = setup()
-	const nudges = () =>
-		toOwner(fake).filter((t) => t.includes('Сессия на маке не запущена'))
-
-	db.push('message', null, 'привет')
-	await scheduler.tick()
-	assert.equal(nudges().length, 0)
-	clock.t = NOW + 120
-	await scheduler.tick()
-	await scheduler.tick()
-	assert.equal(nudges().length, 1)
-	db.take()
-	await scheduler.tick() // входящих не осталось — флаг сбрасывается
-	db.push('message', null, 'ещё')
-	clock.t = NOW + 300
-	await scheduler.tick()
-	assert.equal(nudges().length, 2)
-})
-
 test('publishes the fresh text, not the due() snapshot', async () => {
 	const { fake, db, scheduler, post } = setup()
 	const second = db.create({ rubric: 'мысль', text: 'Старый текст' })
@@ -323,24 +303,6 @@ test('run survives a throwing tick', async () => {
 	assert.equal(calls, 2)
 })
 
-test('nudge is retried after a failed send', async () => {
-	const { fake, clock, db, scheduler } = setup()
-	const restore = quiet()
-
-	db.push('message', null, 'привет')
-	clock.t = NOW + 120
-	fake.fail('sendMessage', apiError('sendMessage', 400, 'Bad Request'))
-	await scheduler.tick()
-	await scheduler.tick()
-	restore()
-
-	assert.equal(
-		toOwner(fake).filter((t) => t.includes('Сессия на маке не запущена'))
-			.length,
-		2,
-	)
-})
-
 test('recover survives a failing card and offers «Открыть»', async () => {
 	const { fake, clock, db, scheduler, post } = setup()
 	const late = db.create({ rubric: 'мысль', text: 'Поздно' })
@@ -360,20 +322,6 @@ test('recover survives a failing card and offers «Открыть»', async () =
 
 	assert.match(kb, new RegExp(`o:${late.id}`))
 	assert.doesNotMatch(kb, /"d:/)
-})
-
-test('overlapping ticks send one nudge', async () => {
-	const { fake, clock, db, scheduler } = setup()
-
-	db.push('message', null, 'привет')
-	clock.t = NOW + 120
-	await Promise.all([scheduler.tick(), scheduler.tick()])
-
-	assert.equal(
-		toOwner(fake).filter((t) => t.includes('Сессия на маке не запущена'))
-			.length,
-		1,
-	)
 })
 
 test('publishing waits for a revise in flight and sends its final text', async () => {

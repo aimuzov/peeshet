@@ -611,17 +611,6 @@ export class Db {
 		return toInbox(row)
 	}
 
-	/** Входящие, которые никто не взял дольше `age` секунд. */
-	untaken(age: number): InboxItem[] {
-		const rows = this.#db
-			.prepare(
-				`SELECT * FROM inbox WHERE taken_at IS NULL AND acked_at IS NULL AND kind != '${LEGACY_PHOTO}' AND created_at <= ? ORDER BY id`,
-			)
-			.all(this.#now() - age) as Row[]
-
-		return rows.map(toInbox)
-	}
-
 	#undoable(id: number, found: boolean): boolean {
 		const { status } = this.get(id)
 
