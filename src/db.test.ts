@@ -335,17 +335,6 @@ test('inbox take, ack and reclaim', () => {
 	assert.throws(() => db.ack(999), NotFound)
 })
 
-test('untaken inbox items by age', () => {
-	const { db, clock } = open()
-
-	db.push('message', null, 'привет')
-	assert.deepEqual(db.untaken(120), [])
-	clock.t = NOW + 120
-	assert.equal(db.untaken(120).length, 1)
-	db.take()
-	assert.deepEqual(db.untaken(120), [])
-})
-
 test('claim ignores posts that are not due anymore', () => {
 	const { db, clock } = open()
 	const moved = draft(db)
@@ -404,10 +393,8 @@ test('legacy photo items never reach the session', () => {
 	const db = new Db(path, () => NOW + 600)
 
 	new DatabaseSync(path).exec(legacy)
-	assert.equal(db.untaken(120).length, 1)
 	assert.equal(db.take()?.text, 'привет')
 	assert.equal(db.take(), null)
-	assert.deepEqual(db.untaken(0), [])
 	rmSync(dir, { recursive: true })
 })
 

@@ -12,8 +12,6 @@ import { reason, retry, send } from '#src/send.ts'
 const TICK = 30_000
 // Опоздание до 5 минут ещё считается вовремя, больше — решает владелец.
 const GRACE = 300
-// Через сколько секунд невзятое входящее значит, что сессия на маке не запущена.
-const INBOX_IDLE = 120
 
 const TITLE = 24
 
@@ -44,7 +42,6 @@ export class Scheduler {
 	readonly #cfg: CardsConfig
 	readonly #sleep: (ms: number) => Promise<void>
 	readonly #tickMs: number
-	#nudged = false
 
 	constructor(
 		api: Api,
@@ -97,8 +94,6 @@ export class Scheduler {
 
 	async tick(): Promise<void> {
 		for (const post of this.#db.due()) await this.#publish(post)
-
-		await this.#nudge()
 	}
 
 	async run(signal: AbortSignal): Promise<void> {
@@ -154,28 +149,5 @@ export class Scheduler {
 		await retry(() => this.#cards.show(id), this.#sleep).catch(
 			log('published card failed'),
 		)
-	}
-
-	async #nudge(): Promise<void> {
-		if (!this.#db.untaken(0).length) {
-			this.#nudged = false
-
-			return
-		}
-
-		if (this.#nudged || !this.#db.untaken(INBOX_IDLE).length) return
-
-		// Флаг до отправки: пересёкшиеся тики не пришлют два напоминания.
-		this.#nudged = true
-
-		try {
-			await this.#notify(
-				'Сессия на маке не запущена, займусь, когда запустишь.',
-			)
-		} catch (e) {
-			// Сбросили флаг: следующий тик попробует снова.
-			this.#nudged = false
-			console.error('nudge failed', e)
-		}
 	}
 }

@@ -28,8 +28,10 @@ npm run dev
 - `PEESHET_API_URL` -- адрес API, по умолчанию `https://peeshet.aimuzov.online`.
 
 Глобально MCP подключён через chezmoi (`home/dot_claude/mcp.json.tmpl`), токен
-берётся из KeePassXC. Входящие из бота разбирает команда `/inbox` (`.claude/commands/inbox.md`), в сессии
-в папке `peeshet` её запускают как `/loop 1m /inbox`. Черновики из заметок пишет агент `peeshet`
+берётся из KeePassXC. Бот просто копит сообщения владельца (и ставит на них 👀). Как это работает:
+пишешь боту, когда удобно; когда хочется разобрать накопленное, открываешь сессию Claude Desktop
+в папке `peeshet` и один раз запускаешь `/inbox` (`.claude/commands/inbox.md`): команда обходит всё
+накопленное и останавливается. Фонового опроса нет. Черновики из заметок пишет агент `peeshet`
 (`.claude/agents/peeshet.md`), он же вызывается командой `/post`.
 
 ## Деплой
