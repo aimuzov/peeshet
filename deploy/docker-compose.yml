@@ -43,6 +43,10 @@ services:
     restart: unless-stopped
     network_mode: service:tunnel
     env_file: ../.env
+    # Переопределяет .env: скопированный из .env.example DATA_DIR=data увёл бы базу из тома.
+    environment:
+      DATA_DIR: /data
+      PORT: '8080'
     volumes:
       - ../data:/data
     mem_limit: 256m
