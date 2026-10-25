@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { test } from 'node:test'
 
 import { ApiError, PeeshetClient } from '#src/mcp/client.ts'
@@ -58,4 +60,73 @@ test('unreachable server is a readable error', async () => {
 		new PeeshetClient('http://127.0.0.1:9', 's').request('GET', '/health'),
 		/peeshet недоступен/,
 	)
+})
+
+test('network errors include the cause', async () => {
+	const server = createServer()
+
+	await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+
+	const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+
+	await new Promise((r) => server.close(r))
+
+	await assert.rejects(
+		new PeeshetClient(url, 's').request('GET', '/health'),
+		/ECONNREFUSED/,
+	)
+})
+
+test('a 2xx answer that is not json points at the url', async (t) => {
+	const server = createServer((_, res) => res.end('<html>'))
+
+	await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+	t.after(() => server.close())
+
+	const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+
+	await assert.rejects(
+		new PeeshetClient(url, 's').request('GET', '/health'),
+		/не JSON \(проверь PEESHET_API_URL\)/,
+	)
+})
+
+test('a silent server hits the timeout', async (t) => {
+	const server = createServer(() => {})
+
+	await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+
+	t.after(() => {
+		server.closeAllConnections()
+		server.close()
+	})
+
+	const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+
+	await assert.rejects(
+		new PeeshetClient(url, 's').request('GET', '/x', undefined, {
+			timeoutMs: 50,
+		}),
+		/peeshet не ответил за 0 с/,
+	)
+})
+
+test('an aborted signal is a cancelled request', async (t) => {
+	const server = createServer(() => {})
+
+	await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+
+	t.after(() => {
+		server.closeAllConnections()
+		server.close()
+	})
+
+	const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+	const ctl = new AbortController()
+	const pending = new PeeshetClient(url, 's').request('GET', '/x', undefined, {
+		signal: ctl.signal,
+	})
+
+	ctl.abort()
+	await assert.rejects(pending, /Запрос отменён/)
 })

@@ -1,11 +1,12 @@
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import { createRequire } from 'node:module'
-import { extname } from 'node:path'
+import { homedir } from 'node:os'
+import { extname, isAbsolute } from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 
-import { PeeshetClient } from '#src/mcp/client.ts'
+import { PeeshetClient, type Opts } from '#src/mcp/client.ts'
 import { RUBRICS } from '#src/post.ts'
 
 // Версию читаем в рантайме, чтобы рукопожатие MCP не отставало от package.json.
@@ -22,6 +23,7 @@ export function loadConfig(env = process.env): Config {
 	}
 }
 
+const MAX_IMAGE = 10 * 1024 * 1024
 const NO_TOKEN = 'PEESHET_API_TOKEN не задан'
 
 const IMAGE_TYPES: Record<string, string> = {
@@ -53,16 +55,17 @@ export function createServer(
 		name: string,
 		description: string,
 		inputSchema: S,
-		run: (args: z.infer<z.ZodObject<S>>) => Promise<unknown>,
+		run: (args: z.infer<z.ZodObject<S>>, opts: Opts) => Promise<unknown>,
 	) {
 		// Типы SDK не умеют выводить аргументы из обобщённой формы, поэтому приведение одно, здесь.
 		const handler = async (
 			args: z.infer<z.ZodObject<S>>,
+			extra: { signal: AbortSignal },
 		): Promise<CallToolResult> => {
 			if (!cfg.token) return failure(NO_TOKEN)
 
 			try {
-				return await run(args).then((v) =>
+				return await run(args, { signal: extra.signal }).then((v) =>
 					typeof v === 'string' ? text(v) : json(v),
 				)
 			} catch (e) {
@@ -83,15 +86,17 @@ export function createServer(
 		'list_posts',
 		'List posts in the queue. Optional status filter, comma-separated.',
 		{ status: z.string().optional().describe('e.g. draft,scheduled') },
-		({ status }) =>
+		({ status }, o) =>
 			client.request(
 				'GET',
 				`/api/posts${status ? `?status=${encodeURIComponent(status)}` : ''}`,
+				undefined,
+				o,
 			),
 	)
 
-	tool('get_post', 'Get a post with its media and revisions.', { id }, (a) =>
-		client.request('GET', `/api/posts/${a.id}`),
+	tool('get_post', 'Get a post with its media and revisions.', { id }, (a, o) =>
+		client.request('GET', `/api/posts/${a.id}`, undefined, o),
 	)
 
 	tool(
@@ -107,7 +112,7 @@ export function createServer(
 			sources: z.array(z.string()).optional(),
 			imagePrompt: z.string().optional().describe('Prompt for a cover image'),
 		},
-		(body) => client.request('POST', '/api/posts', body),
+		(body, o) => client.request('POST', '/api/posts', body, o),
 	)
 
 	tool(
@@ -122,15 +127,18 @@ export function createServer(
 				.optional()
 				.describe('New full text, rich Markdown'),
 			rubric: z.enum(RUBRICS).optional(),
-			voice: z.number().optional(),
-			imagePrompt: z.string().optional(),
+			voice: z.number().nullable().optional(),
+			imagePrompt: z.string().nullable().optional(),
 		},
-		({ id: postId, ...body }) =>
-			client.request('PATCH', `/api/posts/${postId}`, body),
+		({ id: postId, ...body }, o) =>
+			client.request('PATCH', `/api/posts/${postId}`, body, o),
 	)
 
-	tool('revert_post', 'Restore the previous revision of a post.', { id }, (a) =>
-		client.request('POST', `/api/posts/${a.id}/revert`),
+	tool(
+		'revert_post',
+		'Restore the previous revision of a post.',
+		{ id },
+		(a, o) => client.request('POST', `/api/posts/${a.id}/revert`, undefined, o),
 	)
 
 	tool(
@@ -144,24 +152,38 @@ export function createServer(
 				.describe('ISO time with offset, 2026-10-24T12:00:00+03:00'),
 			slot: z.literal('next').optional(),
 		},
-		({ id: postId, ...body }) =>
-			client.request('POST', `/api/posts/${postId}/schedule`, body),
+		({ id: postId, ...body }, o) => {
+			if (!body.at === !body.slot)
+				throw new Error('Нужен ровно один из параметров: at или slot.')
+
+			return client.request('POST', `/api/posts/${postId}/schedule`, body, o)
+		},
 	)
 
-	tool('unschedule_post', 'Take a post off the schedule.', { id }, (a) =>
-		client.request('POST', `/api/posts/${a.id}/unschedule`),
+	tool('unschedule_post', 'Take a post off the schedule.', { id }, (a, o) =>
+		client.request('POST', `/api/posts/${a.id}/unschedule`, undefined, o),
 	)
 
 	tool(
 		'attach_image',
-		'Upload a local png/jpg/webp to a post. Returns `key`; reference it in the text as `![](tg://photo?id=<key>)`.',
-		{ id, path: z.string().describe('Local path to the image') },
-		async ({ id: postId, path }) => {
+		'Upload a local png/jpg/webp (absolute path) to a post. Returns `key`; reference it in the text as `![](tg://photo?id=<key>)`.',
+		{
+			id,
+			path: z.string().describe('Absolute path to the image (~ is expanded)'),
+		},
+		async ({ id: postId, path: raw }, o) => {
+			const path = raw.replace(/^~(?=\/|$)/, homedir())
+
+			if (!isAbsolute(path)) throw new Error('Нужен абсолютный путь к картинке')
+
 			const type = IMAGE_TYPES[extname(path).toLowerCase()]
 
 			if (!type) throw new Error('Нужен файл png, jpg или webp.')
 
-			return client.upload(postId, await readFile(path), type)
+			if ((await stat(path)).size > MAX_IMAGE)
+				throw new Error('Картинка больше 10 МБ: Telegram её не примет.')
+
+			return client.upload(postId, await readFile(path), type, o)
 		},
 	)
 
@@ -169,7 +191,8 @@ export function createServer(
 		'preview_post',
 		'Redraw the post card in the bot so the owner sees the current state.',
 		{ id },
-		(a) => client.request('POST', `/api/posts/${a.id}/preview`),
+		(a, o) =>
+			client.request('POST', `/api/posts/${a.id}/preview`, undefined, o),
 	)
 
 	tool(
@@ -187,10 +210,12 @@ export function createServer(
 				.optional()
 				.describe('Seconds to wait for an item, default 25'),
 		},
-		async ({ wait = 25 }) => {
+		async ({ wait = 25 }, o) => {
 			const res = (await client.request(
 				'GET',
 				`/api/inbox/next?wait=${wait}`,
+				undefined,
+				{ ...o, timeoutMs: (wait + 10) * 1000 },
 			)) as {
 				item: unknown
 			}
@@ -203,7 +228,7 @@ export function createServer(
 		'ack_inbox',
 		'Mark an inbox item as handled.',
 		{ id: z.number().int().describe('Inbox item id') },
-		(a) => client.request('POST', `/api/inbox/${a.id}/ack`),
+		(a, o) => client.request('POST', `/api/inbox/${a.id}/ack`, undefined, o),
 	)
 
 	return server

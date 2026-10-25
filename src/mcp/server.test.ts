@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync } from 'node:fs'
+import { createServer as createHttpServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -157,4 +159,95 @@ test('without a token every tool fails before any request', async (t) => {
 	assert.equal(res.isError, true)
 	assert.equal(res.text, 'PEESHET_API_TOKEN не задан')
 	assert.equal(calls.length, 0)
+})
+
+test('update_post passes null to clear voice and imagePrompt', async (t) => {
+	const { calls, call } = await setup(t)
+
+	await call('update_post', { id: 1, voice: null, imagePrompt: null })
+
+	assert.deepEqual(JSON.parse(calls[0]!.body.toString()), {
+		voice: null,
+		imagePrompt: null,
+	})
+})
+
+test('schedule_post needs exactly one of at and slot', async (t) => {
+	const { calls, call } = await setup(t)
+	const none = await call('schedule_post', { id: 1 })
+	const both = await call('schedule_post', {
+		id: 1,
+		at: '2026-10-24T12:00:00+03:00',
+		slot: 'next',
+	})
+
+	assert.equal(none.isError, true)
+	assert.equal(both.isError, true)
+	assert.equal(calls.length, 0)
+
+	const ok = await call('schedule_post', { id: 1, slot: 'next' })
+
+	assert.equal(ok.isError, undefined)
+	assert.equal(calls.length, 1)
+})
+
+test('attach_image wants an absolute path, expands ~ and caps the size', async (t) => {
+	const { calls, call } = await setup(t, () => [200, { key: 'p1' }])
+	const dir = mkdtempSync(join(tmpdir(), 'peeshet-'))
+
+	writeFileSync(join(dir, 'big.png'), Buffer.alloc(10 * 1024 * 1024 + 1))
+
+	const rel = await call('attach_image', { id: 1, path: 'a.png' })
+	const big = await call('attach_image', { id: 1, path: join(dir, 'big.png') })
+	const home = await call('attach_image', {
+		id: 1,
+		path: '~/no-such-dir/a.png',
+	})
+
+	assert.equal(rel.text, 'Нужен абсолютный путь к картинке')
+	assert.match(big.text, /больше 10 МБ/)
+	// ~ раскрыт: ошибка про отсутствующий файл, а не про путь
+	assert.match(home.text, /ENOENT/)
+	assert.equal(calls.length, 0)
+})
+
+test('aborting a pending next_inbox closes the http request', async (t) => {
+	let opened!: () => void
+	let closed!: () => void
+	const seen = new Promise<void>((r) => (opened = r))
+	const gone = new Promise<void>((r) => (closed = r))
+	const server = createHttpServer((req) => {
+		opened()
+		req.on('close', closed)
+	})
+
+	await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+
+	const [a, b] = InMemoryTransport.createLinkedPair()
+	const client = new Client({ name: 'test', version: '0' })
+
+	await createServer({
+		url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+		token: 's',
+	}).connect(a)
+
+	await client.connect(b)
+
+	t.after(() => {
+		void client.close()
+		server.closeAllConnections()
+		server.close()
+	})
+
+	const ctl = new AbortController()
+	const pending = client
+		.callTool({ name: 'next_inbox', arguments: { wait: 25 } }, undefined, {
+			signal: ctl.signal,
+		})
+		.catch(() => {})
+
+	await seen
+	ctl.abort()
+	await pending
+	await gone
 })
