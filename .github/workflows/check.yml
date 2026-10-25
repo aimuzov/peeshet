@@ -1,0 +1,27 @@
+name: Check
+
+# На main эти проверки вызывает workflow деплоя перед выкаткой, а ветки
+# проверяются через PR. Отдельный прогон на push дал бы дубль на тот же коммит.
+on:
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: package.json
+          cache: npm
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run lint:js
+      - run: npm run check
+      - run: npm test
