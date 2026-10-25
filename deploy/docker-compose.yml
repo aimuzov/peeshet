@@ -1,0 +1,64 @@
+# Прод, на сервере проектов в /srv/peeshet. Порты 80/443 у общего Caddy из
+# aimuzov/infra-server: он проксирует peeshet.aimuzov.online на API (8080) через
+# контейнер туннеля в сети edge.
+#
+# С сервера до Telegram не достучаться, поэтому бот живёт в сетевом пространстве
+# tun2socks, который заворачивает весь исходящий трафик в общий VPN-выход
+# infra-server (SOCKS на vpn:1080). Сам бот о прокси не знает.
+#
+# deploy/site.sh из infra-server пересобирает всё на каждый релиз, секреты лежат
+# в /srv/peeshet/.env, база -- в /srv/peeshet/data.
+
+name: peeshet
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: '5m'
+    max-file: '2'
+
+services:
+  tunnel:
+    image: xjasonlyu/tun2socks:v2.6.0
+    container_name: peeshet-tunnel
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      PROXY: socks5://vpn:1080
+      LOGLEVEL: warn
+    networks:
+      - vpn
+      - edge
+    logging: *logging
+
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: peeshet
+    container_name: peeshet
+    restart: unless-stopped
+    network_mode: service:tunnel
+    env_file: ../.env
+    volumes:
+      - ../data:/data
+    mem_limit: 256m
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:8080/health']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      - tunnel
+    logging: *logging
+
+networks:
+  edge:
+    name: edge
+    external: true
+  vpn:
+    name: vpn
+    external: true
