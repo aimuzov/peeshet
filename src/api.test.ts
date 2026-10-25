@@ -536,3 +536,49 @@ test('a post created while telegram is down can still be scheduled', async (t) =
 	assert.equal(res.status, 200)
 	assert.equal(db.get(json.id).status, 'scheduled')
 })
+
+test('ack with an error keeps the owner message and replies to it', async (t) => {
+	const { fake, db, server, call } = await setup()
+
+	t.after(() => server.close())
+	const item = db.push('message', null, 'привет', 42)
+	const long = db.push('message', null, 'ещё', 43)
+
+	const res = await call('POST', `/api/inbox/${item.id}/ack`, {
+		error: 'Telegram дважды не принял разметку',
+	})
+
+	assert.equal(res.status, 200)
+	assert.equal(fake.named('deleteMessage').length, 0)
+
+	const [sent] = fake.named('sendMessage')
+
+	assert.equal(sent?.chat_id, OWNER)
+	assert.equal(sent?.text, 'Не получилось: Telegram дважды не принял разметку')
+
+	assert.deepEqual(sent?.reply_parameters, {
+		message_id: 42,
+		allow_sending_without_reply: true,
+	})
+
+	await call('POST', `/api/inbox/${long.id}/ack`, { error: 'я'.repeat(900) })
+
+	assert.equal(
+		String(fake.named('sendMessage')[1]?.text).length,
+		'Не получилось: '.length + 500,
+	)
+
+	assert.equal(db.take(), null) // оба помечены разобранными
+})
+
+test('ack rejects a non-string error', async (t) => {
+	const { db, server, call } = await setup()
+
+	t.after(() => server.close())
+	const item = db.push('message', null, 'привет', 42)
+
+	assert.equal(
+		(await call('POST', `/api/inbox/${item.id}/ack`, { error: 5 })).status,
+		400,
+	)
+})

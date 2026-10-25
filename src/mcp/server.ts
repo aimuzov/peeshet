@@ -24,6 +24,7 @@ export function loadConfig(env = process.env): Config {
 }
 
 const MAX_IMAGE = 10 * 1024 * 1024
+const UPLOAD_TIMEOUT = 60_000
 const NO_TOKEN = 'PEESHET_API_TOKEN не задан'
 
 const IMAGE_TYPES: Record<string, string> = {
@@ -183,7 +184,10 @@ export function createServer(
 			if ((await stat(path)).size > MAX_IMAGE)
 				throw new Error('Картинка больше 10 МБ: Telegram её не примет.')
 
-			return client.upload(postId, await readFile(path), type, o)
+			return client.upload(postId, await readFile(path), type, {
+				...o,
+				timeoutMs: UPLOAD_TIMEOUT,
+			})
 		},
 	)
 
@@ -226,9 +230,19 @@ export function createServer(
 
 	tool(
 		'ack_inbox',
-		'Mark an inbox item as handled.',
-		{ id: z.number().int().describe('Inbox item id') },
-		(a, o) => client.request('POST', `/api/inbox/${a.id}/ack`, undefined, o),
+		'Mark an inbox item as handled. If it failed, pass a short Russian `error`: ' +
+			'the owner gets it as a reply and the original message stays in the chat.',
+		{
+			id: z.number().int().describe('Inbox item id'),
+			error: z.string().max(500).optional().describe('Why the item failed'),
+		},
+		({ id: itemId, error }, o) =>
+			client.request(
+				'POST',
+				`/api/inbox/${itemId}/ack`,
+				error ? { error } : undefined,
+				o,
+			),
 	)
 
 	return server

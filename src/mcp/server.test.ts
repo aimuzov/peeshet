@@ -8,6 +8,7 @@ import { test } from 'node:test'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 
+import type { PeeshetClient } from '#src/mcp/client.ts'
 import { createServer } from '#src/mcp/server.ts'
 import { stub } from '#src/mcp/testing.ts'
 
@@ -250,4 +251,46 @@ test('aborting a pending next_inbox closes the http request', async (t) => {
 	ctl.abort()
 	await pending
 	await gone
+})
+
+test('ack_inbox passes the optional error', async (t) => {
+	const { calls, call } = await setup(t)
+
+	await call('ack_inbox', { id: 4 })
+	assert.equal(calls[0]!.url, '/api/inbox/4/ack')
+	assert.equal(calls[0]!.body.length, 0)
+
+	await call('ack_inbox', { id: 4, error: 'не вышло' })
+	assert.deepEqual(JSON.parse(calls[1]!.body.toString()), { error: 'не вышло' })
+
+	const long = await call('ack_inbox', { id: 4, error: 'я'.repeat(501) })
+
+	assert.equal(long.isError, true)
+	assert.equal(calls.length, 2)
+})
+
+test('attach_image gives the upload more time than the default', async (t) => {
+	const seen: unknown[] = []
+	const client = {
+		upload: async (_id: number, _b: Uint8Array, _t: string, o: unknown) => {
+			seen.push(o)
+
+			return { key: 'p1' }
+		},
+	} as unknown as PeeshetClient
+	const [a, b] = InMemoryTransport.createLinkedPair()
+	const mcp = new Client({ name: 'test', version: '0' })
+	const dir = mkdtempSync(join(tmpdir(), 'peeshet-'))
+
+	writeFileSync(join(dir, 'a.png'), Buffer.from([1]))
+	await createServer({ url: 'http://x', token: 's' }, client).connect(a)
+	await mcp.connect(b)
+	t.after(() => void mcp.close())
+
+	await mcp.callTool({
+		name: 'attach_image',
+		arguments: { id: 1, path: join(dir, 'a.png') },
+	})
+
+	assert.equal((seen[0] as { timeoutMs: number }).timeoutMs, 60_000)
 })

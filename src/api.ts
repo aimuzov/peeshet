@@ -38,6 +38,7 @@ export type ApiDeps = {
 // Столько же принимает sendPhoto.
 const MAX_BODY = 10 * 1024 * 1024
 const MAX_WAIT = 25
+const MAX_ERROR = 500
 // Без явного пояса Date.parse берёт пояс сервера, а он не всегда московский.
 const OFFSET = /(Z|[+-]\d\d:\d\d)$/
 
@@ -339,11 +340,33 @@ export function serve(deps: ApiDeps): Server {
 		const id = Number(segment)
 
 		if (req.method === 'POST' && action === 'ack' && Number.isSafeInteger(id)) {
+			const body = await readJson(req)
+
+			if (body.error !== undefined && !isString(body.error))
+				throw new Invalid('Неверное поле error.')
+
 			const { srcMsgId } = db.ack(id)
 
-			// Разобранное сообщение владельца больше не нужно в чате; не вышло — не страшно.
-			if (srcMsgId !== null)
+			if (body.error) {
+				// Сбой не должен исчезнуть вместе с сообщением: владелец видит причину в ответе на него.
+				await api
+					.sendMessage(
+						ownerId,
+						`Не получилось: ${body.error.slice(0, MAX_ERROR)}`,
+						srcMsgId === null
+							? undefined
+							: {
+									reply_parameters: {
+										message_id: srcMsgId,
+										allow_sending_without_reply: true,
+									},
+								},
+					)
+					.catch((e: unknown) => console.error('ack notice failed', e))
+			} else if (srcMsgId !== null) {
+				// Разобранное сообщение владельца больше не нужно в чате; не вышло — не страшно.
 				await api.deleteMessage(ownerId, srcMsgId).catch(() => {})
+			}
 
 			return reply(res, 200, { ok: true })
 		}
