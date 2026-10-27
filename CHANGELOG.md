@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.1.0](https://github.com/aimuzov/peeshet/compare/v1.0.0...v1.1.0) (2026-10-27)
+
+
+### Features
+
+* report errors to Sentry ([633549b](https://github.com/aimuzov/peeshet/commit/633549b47c95d35365ec8695be054d95ffdd1e00))
+* report errors to Sentry ([dd97b28](https://github.com/aimuzov/peeshet/commit/dd97b2863a2312c89aa59ad296d68e493b9607b8))
+
+
+### Bug Fixes
+
+* drop the Sentry process session ([687abcf](https://github.com/aimuzov/peeshet/commit/687abcf8a42f2a595884b4a52d4e3515ca6787e7))
+* init Sentry before config validation, scrub JSON-escaped secrets ([26b7134](https://github.com/aimuzov/peeshet/commit/26b71347c7532a82fd3cf8dc1091e651a8d3723f))
+* restrict Sentry data collection to errors ([6f6e19a](https://github.com/aimuzov/peeshet/commit/6f6e19abce06294f79a887a46459c59d5c104ea8))
+
 ## [1.0.0](https://github.com/aimuzov/peeshet/compare/v0.1.0...v1.0.0) (2026-10-25)
 
 
