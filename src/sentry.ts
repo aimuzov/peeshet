@@ -46,6 +46,17 @@ export function initSentry({
 		release: `peeshet@${version}`,
 		environment: env.SENTRY_ENVIRONMENT?.trim() || 'production',
 		initialScope: { tags: { component } },
+		// Дефолты v11 собирают всё: пользователя, заголовки, тела, query. Нам нужны только ошибки.
+		dataCollection: {
+			userInfo: false,
+			cookies: false,
+			httpHeaders: false,
+			httpBodies: [],
+			urlQueryParams: false,
+			genAI: { inputs: false, outputs: false },
+			stackFrameVariables: false,
+		},
+		integrations: [Sentry.httpIntegration({ sessions: false })],
 		beforeSend: (event) => scrub(event, secrets),
 		beforeBreadcrumb: (crumb) => scrub(crumb, secrets),
 	})
