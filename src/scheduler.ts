@@ -8,6 +8,7 @@ import type { Cards, CardsConfig } from '#src/cards.ts'
 import type { Db } from '#src/db.ts'
 import type { Post } from '#src/post.ts'
 import { reason, retry, send } from '#src/send.ts'
+import { report } from '#src/sentry.ts'
 
 const TICK = 30_000
 // Опоздание до 5 минут ещё считается вовремя, больше — решает владелец.
@@ -42,6 +43,7 @@ export class Scheduler {
 	readonly #cfg: CardsConfig
 	readonly #sleep: (ms: number) => Promise<void>
 	readonly #tickMs: number
+	readonly #monitor: (tick: () => Promise<void>) => Promise<void>
 
 	constructor(
 		api: Api,
@@ -50,6 +52,7 @@ export class Scheduler {
 		cfg: CardsConfig,
 		sleep = (ms: number) => delay(ms),
 		tickMs = TICK,
+		monitor = (tick: () => Promise<void>) => tick(),
 	) {
 		this.#api = api
 		this.#db = db
@@ -57,6 +60,7 @@ export class Scheduler {
 		this.#cfg = cfg
 		this.#sleep = sleep
 		this.#tickMs = tickMs
+		this.#monitor = monitor
 	}
 
 	/** Разбор после рестарта, до первого тика. */
@@ -99,9 +103,9 @@ export class Scheduler {
 	async run(signal: AbortSignal): Promise<void> {
 		while (!signal.aborted) {
 			try {
-				await this.tick()
+				await this.#monitor(() => this.tick())
 			} catch (e) {
-				console.error('tick failed', e)
+				report('tick failed', e)
 			}
 
 			await delay(this.#tickMs, undefined, { signal }).catch(() => {})

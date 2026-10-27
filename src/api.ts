@@ -20,6 +20,7 @@ import {
 	type Rubric,
 	type Status,
 } from '#src/post.ts'
+import { report } from '#src/sentry.ts'
 import { nextFreeSlot } from '#src/time.ts'
 
 export type ApiDeps = {
@@ -413,7 +414,7 @@ export function serve(deps: ApiDeps): Server {
 
 			if (e instanceof NotFound) return reply(res, 404, { error: e.message })
 
-			console.error('api request failed', e)
+			report('api request failed', e)
 			reply(res, 500, { error: 'Внутренняя ошибка.' })
 		})
 	})

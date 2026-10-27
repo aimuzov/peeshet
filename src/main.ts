@@ -10,24 +10,41 @@ import { fromEnv } from '#src/config.ts'
 import { Db } from '#src/db.ts'
 import { redactConsole } from '#src/redact.ts'
 import { Scheduler } from '#src/scheduler.ts'
+import { fatal, initSentry, monitorTick, report } from '#src/sentry.ts'
 
 process.on('unhandledRejection', (e) => console.error('unhandled rejection', e))
+
+// До проверки настроек: падение из-за пропущенной переменной тоже дойдёт до Sentry.
+initSentry({
+	component: 'bot',
+	secrets: [process.env.BOT_TOKEN, process.env.API_TOKEN].map(
+		(s) => s?.trim() ?? '',
+	),
+})
 
 const settings = fromEnv()
 
 redactConsole(settings.botToken)
+
 const bot = new Bot(settings.botToken)
 const db = new Db(join(settings.dataDir, 'peeshet.db'))
 const cfg = { ownerId: settings.ownerId, channelId: settings.channelId }
 const cards = new Cards(bot.api, db, cfg)
-const scheduler = new Scheduler(bot.api, db, cards, cfg)
-const kick = () =>
-	void scheduler.tick().catch((e) => console.error('tick failed', e))
+const scheduler = new Scheduler(
+	bot.api,
+	db,
+	cards,
+	cfg,
+	undefined,
+	undefined,
+	monitorTick,
+)
+const kick = () => void scheduler.tick().catch((e) => report('tick failed', e))
 
 bot.use(handlers({ db, cards, ownerId: settings.ownerId, kick }))
 
 bot.catch(({ error, ctx }) =>
-	console.error(`update ${ctx.update.update_id} failed`, error),
+	report(`update ${ctx.update.update_id} failed`, error),
 )
 
 await bot.api.setMyCommands([
@@ -50,15 +67,9 @@ const runner = run(bot, {
 	runner: { fetch: { allowed_updates: ['message', 'callback_query'] } },
 })
 
-runner.task()?.catch((e) => {
-	console.error('runner died', e)
-	process.exit(1)
-})
+runner.task()?.catch((e) => fatal('runner died', e))
 
-const loop = scheduler.run(stop.signal).catch((e) => {
-	console.error('scheduler died', e)
-	process.exit(1)
-})
+const loop = scheduler.run(stop.signal).catch((e) => fatal('scheduler died', e))
 
 const shutdown = async () => {
 	stop.abort()

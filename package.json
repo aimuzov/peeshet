@@ -22,6 +22,7 @@
 	"dependencies": {
 		"@grammyjs/runner": "2.0.3",
 		"@modelcontextprotocol/sdk": "1.32.1",
+		"@sentry/node": "11.9.0",
 		"grammy": "1.46.0",
 		"zod": "4.6.7"
 	},
