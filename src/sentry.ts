@@ -24,7 +24,9 @@ export function scrub<T>(value: T, secrets: string[]): T {
 
 	let json = JSON.stringify(value)
 
-	for (const secret of live) json = json.replaceAll(secret, '<redacted>')
+	// Внутри JSON `"` и `\` экранированы, так что и секрет ищем экранированным.
+	for (const secret of live)
+		json = json.replaceAll(JSON.stringify(secret).slice(1, -1), '<redacted>')
 
 	return JSON.parse(json) as T
 }

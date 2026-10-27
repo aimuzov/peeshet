@@ -22,6 +22,13 @@ test('secrets are scrubbed at any depth', () => {
 	assert.ok(!JSON.stringify(event).includes('<redacted>'))
 })
 
+test('a secret with JSON-escaped characters is scrubbed too', () => {
+	const secret = 'a"b\\c'
+	const clean = scrub({ message: `token ${secret} leaked` }, [secret])
+
+	assert.equal(clean.message, 'token <redacted> leaked')
+})
+
 test('without secrets the event is left as is', () => {
 	const event = { message: 'boom' }
 

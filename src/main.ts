@@ -14,14 +14,17 @@ import { fatal, initSentry, monitorTick, report } from '#src/sentry.ts'
 
 process.on('unhandledRejection', (e) => console.error('unhandled rejection', e))
 
+// До проверки настроек: падение из-за пропущенной переменной тоже дойдёт до Sentry.
+initSentry({
+	component: 'bot',
+	secrets: [process.env.BOT_TOKEN, process.env.API_TOKEN].map(
+		(s) => s?.trim() ?? '',
+	),
+})
+
 const settings = fromEnv()
 
 redactConsole(settings.botToken)
-
-initSentry({
-	component: 'bot',
-	secrets: [settings.botToken, settings.apiToken],
-})
 
 const bot = new Bot(settings.botToken)
 const db = new Db(join(settings.dataDir, 'peeshet.db'))
