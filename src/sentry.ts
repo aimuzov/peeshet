@@ -56,7 +56,11 @@ export function initSentry({
 			genAI: { inputs: false, outputs: false },
 			stackFrameVariables: false,
 		},
-		integrations: [Sentry.httpIntegration({ sessions: false })],
+		// Сессии не нужны: ProcessSession иначе стучится в Sentry на каждом старте.
+		integrations: (defaults) => [
+			...defaults.filter((i) => i.name !== 'ProcessSession'),
+			Sentry.httpIntegration({ sessions: false }),
+		],
 		beforeSend: (event) => scrub(event, secrets),
 		beforeBreadcrumb: (crumb) => scrub(crumb, secrets),
 	})
