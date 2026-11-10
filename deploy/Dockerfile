@@ -5,7 +5,8 @@ WORKDIR /app
 ENV NODE_ENV=production \
     DATA_DIR=/data \
     PORT=8080
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --no-audit --no-fund --loglevel=error
+COPY deploy/runtime/package.json deploy/runtime/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev --no-audit --no-fund --loglevel=error
+COPY package.json ./
 COPY src ./src
 CMD ["node", "src/main.ts"]

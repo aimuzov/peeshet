@@ -5,3 +5,7 @@ docs
 drafts
 .claude
 .git
+.codex
+src/mcp
+src/**/*.test.ts
+src/testing.ts
