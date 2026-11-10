@@ -6,8 +6,8 @@
 # tun2socks, который заворачивает весь исходящий трафик в общий VPN-выход
 # infra-server (SOCKS на vpn:1080). Сам бот о прокси не знает.
 #
-# deploy/site.sh из infra-server пересобирает всё на каждый релиз, секреты лежат
-# в /srv/peeshet/.env, база -- в /srv/peeshet/data.
+# Образ приложения собирается в GitHub Actions. Секреты лежат в
+# /srv/peeshet/.env, база — в /srv/peeshet/data.
 
 name: peeshet
 
