@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/aimuzov/peeshet/compare/v1.1.0...v1.2.0) (2026-11-12)
+
+
+### Features
+
+* **deploy:** publish a slim Peeshet image ([#9](https://github.com/aimuzov/peeshet/issues/9)) ([a1c2188](https://github.com/aimuzov/peeshet/commit/a1c218886384def2f31b5a897518f39df7bb5c07))
+
 ## [1.1.0](https://github.com/aimuzov/peeshet/compare/v1.0.0...v1.1.0) (2026-10-27)
 
 
